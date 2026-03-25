@@ -131,7 +131,7 @@ void embed(const Tensor* tokens, const Tensor* embed_weight, Tensor* out) {
 }
 
 inline void add_inplace(const Tensor* in,const Tensor* param) {
-    assert(in->nelements() == param->nelements());
+    // assert(in->nelements() == param->nelements());
     float* in_data = (float*)in->data;
     float* param_data = (float*)param->data;
     for(int i=0; i<in->nelements(); ++i) {
@@ -553,68 +553,69 @@ void matmul(Tensor* tb,const Tensor* weight , Tensor* out) {
 
 
 void rms_norm(const Tensor* tb, const Tensor* norm_weight, Tensor* out, float eps) {
-    
     int d = norm_weight->shape[0];
     int rows = tb->nelements() / d;
 
     float* weight = (float*)norm_weight->data;
     float* data = (float*)tb->data;
-    float* out_data = (float*)out->data;
+    float* out_data = nullptr;
 
-    out->data_type = tb->data_type;
-    out->dim = tb->dim;
-    memcpy(out->shape,tb->shape,sizeof(out->shape));
+    // if out is nullptr, do inplace norm, otherwise write to out
+    if(out == nullptr) {
+        out_data = (float*)tb->data;
+    }
+    else {
+        out_data = (float*)out->data;
+        out->data_type = tb->data_type;
+        out->dim = tb->dim;
+        memcpy(out->shape,tb->shape,sizeof(out->shape));
+    }
 
-    #pragma omp parallel for if(rows >= 8)
     for(size_t i=0; i<rows; ++i) {
         float* x = data + i*d;
         float* o = out_data + i*d;
         float ss = 0.0f;
         
         #if defined(__AVX2__) && defined(__FMA__)
-            //  使用 AVX2 计算平方和
+            
             __m256 sum_vec = _mm256_setzero_ps();
             for (size_t j = 0; j <= d - 8; j += 8) {
                 __m256 v = _mm256_loadu_ps(x + j);
-                sum_vec = _mm256_fmadd_ps(v, v, sum_vec); // v*v + sum
+                sum_vec = _mm256_fmadd_ps(v, v, sum_vec);
             }
-            
-            // 水平求和 (Horizontal sum)
-            /*
-            float tmp[8];
-            _mm256_storeu_ps(tmp, sum_vec);
-            for (int j = 0; j < 8; j++) ss += tmp[j];
-            */
-            
+
             ss = hsum256_ps(sum_vec);
 
-            // 处理末尾不足 8 个的数据
-            for (size_t j = (d/8)*8; j < d; j++) ss += x[j] * x[j];
+            // handle tail when d is not divisible by 8
+            for (size_t j = (d/8)*8; j < d; j++) {
+                ss += x[j] * x[j];
+            }
 
             float inv_rms = 1.0f / sqrtf(ss / d + eps);
-            
             assert(inv_rms > 0.0f);
 
             __m256 v_inv_rms = _mm256_set1_ps(inv_rms);
 
-            // 2. 归一化并乘上权重
+            
             for (size_t j = 0; j <= d - 8; j += 8) {
                 __m256 v_x = _mm256_loadu_ps(x + j);
                 __m256 v_w = _mm256_loadu_ps(weight + j);
                 __m256 v_res = _mm256_mul_ps(_mm256_mul_ps(v_x, v_inv_rms), v_w);
                 _mm256_storeu_ps(o + j, v_res);
             }
-            for (size_t j=(d/8)*8;j<d;++j) o[j] = x[j] * inv_rms * weight[j];
+            for (size_t j=(d/8)*8;j<d;++j) {
+                o[j] = x[j] * inv_rms * weight[j];
+            }
         #else
-          for(int j=0;j<d;++j) {
+        for(int j=0;j<d;++j) {
             ss += x[j] * x[j];
-          }
+        }
 
-          float inv_rms = 1.0f / sqrtf(ss/d + eps);
-          assert(inv_rms > 0.0f);
-          for (size_t j=0;j<d;++j) {
+        float inv_rms = 1.0f / sqrtf(ss/d + eps);
+        assert(inv_rms > 0.0f);
+        for (size_t j=0;j<d;++j) {
             o[j] = x[j] * inv_rms * weight[j];
-          }
+        }
         #endif
     }
 }

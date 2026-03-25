@@ -1,0 +1,9 @@
+
+*.exe
+*.cuh
+
+.vscode/
+qwen35/
+qwen3-0.6b/
+
+run.c

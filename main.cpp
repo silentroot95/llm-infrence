@@ -1,0 +1,99 @@
+#include "qwen3.h"
+#include "tokenizer.h"
+
+#include <chrono>
+
+inline bool is_eos(int token, const std::vector<int>& eos_ids) {
+    for (int id : eos_ids) {
+        if (token == id) return true;
+    }
+    return false;
+}
+
+inline void set_next_token(int next_token, Tensor* tokens) {
+    tokens->shape[0] = 1;
+    int* data = (int*)tokens->data;
+    data[0] = next_token;
+}
+
+
+int main() {
+    ModelConfig model_config;
+    model_config.load_config("./qwen3-0.6b/config.json");
+
+    ModelWeights model_weights;
+    model_weights.init(&model_config);
+    model_weights.load_tensor("./qwen3-0.6b/model.safetensors");
+
+    RunTimeMemory memory;
+    int max_prefill_len = 1024;
+    memory.init(&model_config,max_prefill_len);
+
+
+    Tokenizer tk;
+    tk.load_vocab("./qwen3-0.6b/vocab.json");
+    //printf("%d",tk.vocab.size());
+    tk.load_merges("./qwen3-0.6b/merges.txt");
+    tk.load_gen_config("./qwen3-0.6b/generation_config.json");
+
+    Qwen3 qwen3 = Qwen3(&model_config, &model_weights, &memory);
+
+    std::string prompt = ("hi, who are you? How are you doing? How about todays weather?"
+        "This is a test prompt. Tell me a joke. Is there any performance issue? and what about the quality?"
+        " so many questions. Let's see how the model performs."
+        "The model should be able to answer all the questions and keep the context well. "
+        "The model should be able to answer all the questions and keep the context well. ");
+
+    Tensor tokens;
+    tokens.data_type = TENSOR_DATA_TYPE_INT32;
+    tokens.dim = 1;
+    tokens.data = memory.allocate(max_prefill_len * sizeof(int));
+    tk.encode(prompt, tokens);
+
+    Sampler sampler(model_config.vocab_size, tk.temperature,tk.top_k,tk.top_p);
+    int next_token = -1;
+    std::string next_s;
+
+    int prefill_tokens = tokens.shape[0];
+
+    qwen3.reset_profile();
+    auto step_start = std::chrono::high_resolution_clock::now();
+    Tensor* logits = qwen3.forward(&tokens);
+    auto step_end = std::chrono::high_resolution_clock::now();
+    double prefill_ms = std::chrono::duration<double, std::milli>(step_end - step_start).count();
+    double prefill_tps = prefill_ms > 0.0 ? (1000.0 * prefill_tokens / prefill_ms) : 0.0;
+
+    printf("\n\n[Perf] prefill: %d tokens, %.2f ms, %.2f tokens/s\n",
+           prefill_tokens, prefill_ms, prefill_tps);
+    qwen3.print_profile("prefill");
+    
+    int decode_tokens = 0;
+    double decode_ms = 0.0;  
+    qwen3.reset_profile();
+
+    while (1) {
+        next_token = sampler.sample(logits);
+
+        if (is_eos(next_token, tk.eos_token_id) || 
+            memory.seq_len_processed >= model_config.max_seq_len ||
+            decode_tokens >= 256) {
+            break;
+        }
+
+        next_s = tk.decode(next_token);
+        printf("%s",next_s.c_str());
+        set_next_token(next_token, &tokens);
+
+        step_start = std::chrono::high_resolution_clock::now();
+        logits = qwen3.forward(&tokens);
+        step_end = std::chrono::high_resolution_clock::now();
+        decode_ms += std::chrono::duration<double, std::milli>(step_end - step_start).count();
+        decode_tokens += 1;
+    }
+
+    double decode_tps = decode_ms > 0.0 ? (1000.0 * decode_tokens / decode_ms) : 0.0;
+    printf("\n[Perf] decode : %d tokens, %.2f ms, %.2f tokens/s\n",
+           decode_tokens, decode_ms, decode_tps);
+    qwen3.print_profile("decode");
+    return 0;
+}

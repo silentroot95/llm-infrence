@@ -21,10 +21,6 @@ void attention(Tensor* q,Tensor* k, Tensor* v, int seq_len_processed, float* att
 */
 void matmul(const Tensor* tb,const Tensor* weight , Tensor* out);
 
-void sigmoid(Tensor* x, Tensor* out);
-
-void silu(Tensor* x);
-
 void mlp(Tensor* up, Tensor* gate);
 
 inline void add_inplace(const Tensor* in,const Tensor* param) {

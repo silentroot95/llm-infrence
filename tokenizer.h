@@ -3,9 +3,7 @@
 #include <string>
 #include <vector>
 #include <unordered_map>
-
-#include <bits/stdint-uintn.h>
-
+#include <stdint.h>
 
 
 struct Tensor;

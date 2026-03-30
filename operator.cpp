@@ -626,24 +626,7 @@ void matmul(const Tensor* tb,const Tensor* weight , Tensor* out) {
 }
 
 
-void sigmoid(Tensor* x, Tensor* out) {
-    int n = x->nelements();
-    const float* data = (const float*)x->data;
-    float* out_data = (float*)out->data;
-
-    for(int i =0; i<n;++i) {
-        float v = data[i];
-        if(v > 0) {
-            out_data[i] = 1.0f / (1.0f + expf(-v));
-        }
-        else {
-            float exp_v = expf(v);
-            out_data[i] = exp_v / (1.0f + exp_v);
-        }
-    }
-}
-
-static inline float fsigmoid(float x) {
+static inline float stable_sigmoid(float x) {
     if(x > 0) {
         float z = 1.0f / (1.0f + expf(-x));
         return z;
@@ -654,22 +637,12 @@ static inline float fsigmoid(float x) {
     }
 }
 
-void silu(Tensor* x) {
-    int n = x->nelements();
-    float* data = (float*)x->data;
-    for(int i=0; i<n; ++i) {
-        float v = data[i];
-        data[i] = v * fsigmoid(v);
-    }
-}
-
-
 void mlp(Tensor* up, Tensor* gate) {
     const float* g_data = (const float*)gate->data;
     float* u_data = (float*)up->data; 
     int n = up->nelements();
     for(int i=0;i<n; ++i) {
-        float silu = g_data[i] * fsigmoid(g_data[i]);
+        float silu = g_data[i] * stable_sigmoid(g_data[i]);
         u_data[i] *= silu;
     }
 }

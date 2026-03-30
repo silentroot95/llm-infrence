@@ -549,6 +549,53 @@ void Tokenizer::load_tokenizer_config(const char* path) {
 }
 
 
+void Tokenizer::load_gen_config(const char* path) {
+    size_t size = 0;
+    void* data = memory_map(path, &size);
+
+    char* json_string = (char*)malloc(size + 1);
+    memcpy(json_string,data,size);
+    json_string[size] = '\0';
+
+    memory_unmap(data, size);
+
+    cJSON* json = cJSON_Parse(json_string);
+    if (json==NULL){
+        fprintf(stderr,"Error parsing JSON: %s\n", cJSON_GetErrorPtr());
+        free(json_string);
+        exit(EXIT_FAILURE);
+    }
+    cJSON* item = cJSON_GetObjectItemCaseSensitive(json,"bos_token_id");
+    bos_token_id = item->valueint;
+
+    item = cJSON_GetObjectItemCaseSensitive(json, "eos_token_id");
+
+    cJSON* element = NULL;
+    if(cJSON_IsNumber(item)) {
+        eos_token_id.push_back(item->valueint);
+    }
+    else if(cJSON_IsArray(item)) {
+        cJSON_ArrayForEach(element, item) {
+            eos_token_id.push_back(element->valueint);
+        }
+    }
+
+    item = cJSON_GetObjectItemCaseSensitive(json, "pad_token_id");
+    pad_token_id = item->valueint;
+
+    item = cJSON_GetObjectItemCaseSensitive(json, "temperature");
+    temperature = item->valuedouble;
+ 
+    item = cJSON_GetObjectItemCaseSensitive(json, "top_p");
+    top_p = item->valuedouble;
+
+    item = cJSON_GetObjectItemCaseSensitive(json, "top_k");
+    top_k = item->valueint;
+
+    free(json_string);
+    cJSON_Delete(json);
+}
+
 Sampler::Sampler(int vocab_size,float t,float p,int k) : 
     m_temperature(t),
     m_top_k(k),
@@ -558,7 +605,6 @@ Sampler::Sampler(int vocab_size,float t,float p,int k) :
             m_indices[i] = i;
         }
     }
-
 
 int Sampler::sample(const Tensor* data, bool do_sample) {
 
@@ -634,50 +680,3 @@ int Sampler::sample_multinomial(const std::vector<int>& idx,
     return idx.back();
 }
 
-
-void Tokenizer::load_gen_config(const char* path) {
-    size_t size = 0;
-    void* data = memory_map(path, &size);
-
-    char* json_string = (char*)malloc(size + 1);
-    memcpy(json_string,data,size);
-    json_string[size] = '\0';
-
-    memory_unmap(data, size);
-
-    cJSON* json = cJSON_Parse(json_string);
-    if (json==NULL){
-        fprintf(stderr,"Error parsing JSON: %s\n", cJSON_GetErrorPtr());
-        free(json_string);
-        exit(EXIT_FAILURE);
-    }
-    cJSON* item = cJSON_GetObjectItemCaseSensitive(json,"bos_token_id");
-    bos_token_id = item->valueint;
-
-    item = cJSON_GetObjectItemCaseSensitive(json, "eos_token_id");
-
-    cJSON* element = NULL;
-    if(cJSON_IsNumber(item)) {
-        eos_token_id.push_back(item->valueint);
-    }
-    else if(cJSON_IsArray(item)) {
-        cJSON_ArrayForEach(element, item) {
-            eos_token_id.push_back(element->valueint);
-        }
-    }
-
-    item = cJSON_GetObjectItemCaseSensitive(json, "pad_token_id");
-    pad_token_id = item->valueint;
-
-    item = cJSON_GetObjectItemCaseSensitive(json, "temperature");
-    temperature = item->valuedouble;
- 
-    item = cJSON_GetObjectItemCaseSensitive(json, "top_p");
-    top_p = item->valuedouble;
-
-    item = cJSON_GetObjectItemCaseSensitive(json, "top_k");
-    top_k = item->valueint;
-
-    free(json_string);
-    cJSON_Delete(json);
-}

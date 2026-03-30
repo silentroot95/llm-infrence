@@ -1,9 +1,14 @@
 
 *.exe
 *.cuh
+app
 
 .vscode/
 qwen35/
 qwen3-0.6b/
+cppbin/
+pybin/
+cpp_weight/
+py_weight/
 
 run.c

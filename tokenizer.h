@@ -1,7 +1,12 @@
 #pragma once
 
+#include <string>
 #include <vector>
 #include <unordered_map>
+
+#include <bits/stdint-uintn.h>
+
+
 
 struct Tensor;
 
@@ -41,12 +46,28 @@ struct ByteEncoder {
     }
 };
 
+struct ToolCall {
+    std::string name;
+    std::string arguments_json;
+};
+
+struct ToolDefinition {
+    std::string json;
+};
+
+struct ChatMessage {
+    std::string role;
+    std::string content;
+    std::string reasoning_content;
+    std::vector<ToolCall> tool_calls;
+};
 
 struct Tokenizer {
     //using std::string;
     std::unordered_map<std::string, int> vocab;
     std::unordered_map<int, std::string> id_to_token;
     std::unordered_map<uint64_t, int> merges;
+    std::vector<std::string> added_tokens;
     ByteEncoder encoder;
 
     int bos_token_id;
@@ -59,24 +80,30 @@ struct Tokenizer {
     std::vector<std::string> byte_split(const std::string& text);
     int find_best_merge(const std::vector<std::string>& tokens, int& best_idx);
     std::vector<std::string> bpe(const std::string& text);
-    void encode(const std::string& text, Tensor& ids);
+    std::vector<int> encode(const std::string& text);
     void load_vocab(const char* path);
     void load_merges(const char* path);
     std::string decode(int id);
     void load_gen_config(const char* path);
+    void load_tokenizer_config(const char* path);
+    std::string apply_chat_template(
+        const std::vector<ChatMessage>& messages,
+        bool add_generation_prompt = true,
+        const std::vector<ToolDefinition>& tools = {},
+        bool enable_thinking = false
+    ) const;
 };
 
 
 struct Sampler {
-    float temperature;
-    int top_k;
-    float top_p;
+    float m_temperature;
+    int m_top_k;
+    float m_top_p;
     
-    std::vector<int> indices;     
-    std::vector<float> probs;
+    std::vector<int> m_indices;     
 
-    Sampler(int vocab_size,float t,int top_k,float top_p);
-    int sample(Tensor* logits);
+    Sampler(int vocab_size,float t,float top_p, int top_k);
+    int sample(const Tensor* logits, bool do_sample=true);
     int sample_multinomial(const std::vector<int>& idx,
                            const std::vector<float>& p);
 };

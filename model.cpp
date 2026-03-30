@@ -1,47 +1,22 @@
 
 #include <assert.h>
+#include "cJSON.h"
+
 
 #include "model.h"
 #include "mmap.h"
 
-#include "cJSON.h"
 
-static void init_tensor_layout(Tensor* t) {
-    t->packed_data = nullptr;
-    t->packed_block = 0;
+void save_logits(const char* filename, float* logits, int m, int n) {
+    FILE* f = fopen(filename, "wb");  // wb = binary write
+
+    Header h = {m, n};
+    fwrite(&h, sizeof(Header), 1, f);
+
+    fwrite(logits, sizeof(float), m*n, f);
+    fflush(f);
+    fclose(f);
 }
-
-static void pack_weight_4col(Tensor* weight) {
-    if (weight->data_type != TENSOR_DATA_TYPE_F32 || weight->dim != 2) {
-        return;
-    }
-
-    const int out_dim = weight->shape[0];
-    const int hidden_size = weight->shape[1];
-    const int block = 4;
-    const int padded_out = ((out_dim + block - 1) / block) * block;
-
-    float* src = (float*)weight->data;
-    float* packed = (float*)malloc((size_t)padded_out * hidden_size * sizeof(float));
-    if (!packed) {
-        fprintf(stderr, "malloc packed weight failed!\n");
-        exit(EXIT_FAILURE);
-    }
-
-    for (int ob = 0; ob < padded_out; ob += block) {
-        float* dst = packed + ob * hidden_size;
-        for (int i = 0; i < hidden_size; ++i) {
-            for (int lane = 0; lane < block; ++lane) {
-                const int out_idx = ob + lane;
-                dst[i * block + lane] = out_idx < out_dim ? src[out_idx * hidden_size + i] : 0.0f;
-            }
-        }
-    }
-
-    weight->packed_data = packed;
-    weight->packed_block = block;
-}
-
 
 void ModelConfig::load_config(const char* path) {
     size_t size = 0;
@@ -92,7 +67,7 @@ void ModelConfig::load_config(const char* path) {
 }
 
 
-static void copy_to_f32(const cJSON* json,const char* name,void* begin_ptr, void* dst) {
+static void copy_data(const cJSON* json,const char* name,void* begin_ptr, Tensor* dst) {
     cJSON* tensor_info = cJSON_GetObjectItemCaseSensitive(json,name);
     cJSON* dtype = cJSON_GetObjectItemCaseSensitive(tensor_info,"dtype");
     cJSON* data_offsets = cJSON_GetObjectItemCaseSensitive(tensor_info, "data_offsets");
@@ -102,26 +77,26 @@ static void copy_to_f32(const cJSON* json,const char* name,void* begin_ptr, void
 
     uint64_t offset = cJSON_GetArrayItem(data_offsets,0)->valuedouble;
     uint64_t end_offset = cJSON_GetArrayItem(data_offsets,1)->valuedouble;
-    uint8_t* tensor_data_ptr = (uint8_t*)begin_ptr  + offset;
+    uint8_t* tensor_data = (uint8_t*)begin_ptr  + offset;
 
     uint64_t nbytes = end_offset - offset;
     TENSOR_DATA_TYPE data_type = get_data_type(dtype->valuestring);
-    uint64_t num = nbytes / get_data_type_size(data_type);
+    size_t num = nbytes / get_data_type_size(data_type);
 
-    float* dst_data = (float*)dst;
-
-    switch (data_type){
-    case TENSOR_DATA_TYPE_F32:
-        memcpy(dst,tensor_data_ptr,nbytes);
-        break;
-
-    case TENSOR_DATA_TYPE_BF16:{
-        uint16_t* src = (uint16_t*)tensor_data_ptr; 
-        for(int i=0;i<num;++i) {
+    switch (dst->data_type){
+    case TENSOR_DATA_TYPE_F32: {
+        float* dst_data = (float*)dst->data;
+        uint16_t* src = (uint16_t*)tensor_data; 
+        size_t dst_num = dst->nelements();
+        assert(num == dst_num);
+        for(size_t i=0; i<num; ++i) {
             dst_data[i] = bf16_to_f32(src[i]);
         }
         break;
     }
+    case TENSOR_DATA_TYPE_BF16:
+        memcpy(dst->data,tensor_data,nbytes);
+        break;
     default:
         fprintf(stderr,"Not Supported!\n");
         exit(EXIT_FAILURE);
@@ -134,8 +109,9 @@ void ModelWeights::init(const ModelConfig* config) {
     //model_config = &config;
     TENSOR_DATA_TYPE dtype = TENSOR_DATA_TYPE_F32;
     size_t dtype_size = get_data_type_size(dtype);
+    size_t bf16_dtype_size = get_data_type_size(TENSOR_DATA_TYPE_BF16);
 
-    size_t total_elements = (
+    size_t f32_elements = (
         2*config->embed_size * config->vocab_size  //embed and lm_head 
         + config->embed_size                      //final_norm
         + config->num_layers*(
@@ -143,52 +119,48 @@ void ModelWeights::init(const ModelConfig* config) {
             + 2*config->q_heads * config->head_size * config->embed_size       //q weight and o weight
             + 2*config->kv_heads * config->head_size * config->embed_size      //k v weight
             + 2 * config->head_size                                          //q k norm
-            + 3 * config->embed_size * config->ffn_size                       //up gate down weight
+            + 3 * config->embed_size * config->ffn_size                       // down weight
         )
     );
-    data = malloc(dtype_size * total_elements);
+
+    data = malloc(dtype_size * f32_elements );
 
     if(!data) {
-        fprintf(stderr,"malloc failed!\n");
+        fprintf(stderr,"%s,%d malloc failed!\n", __FILE__, __LINE__);
         exit(EXIT_FAILURE);
     }
     
+    layers = (TransformerLayer*)malloc(sizeof(TransformerLayer)*config->num_layers);
+    num_layers = config->num_layers;
+    if(!layers) {
+        fprintf(stderr,"%s,%d: malloc failed!\n", __FILE__, __LINE__);
+        exit(EXIT_FAILURE);
+    }
+
     uint8_t* ptr = (uint8_t*)data;
 
     embeds.data_type = dtype;
     embeds.dim = 2;
     embeds.shape[0] = config->vocab_size;
     embeds.shape[1] = config->embed_size;
-    memcpy(&lm_heads,&embeds,sizeof(lm_heads));
-    init_tensor_layout(&embeds);
     embeds.data = (void*)ptr;
     ptr += embeds.nbytes();
     
+    lm_heads.copy_meta(&embeds);
     lm_heads.data = (void*)ptr;
-    init_tensor_layout(&lm_heads);
     ptr += lm_heads.nbytes();
 
     output_norm.data_type = dtype;
     output_norm.dim = 1;
     output_norm.shape[0] = config->embed_size;
     output_norm.data = (void*)ptr;
-    init_tensor_layout(&output_norm);
     ptr += output_norm.nbytes();
-
-    
-    layers = (TransformerLayer*)malloc(sizeof(TransformerLayer)*config->num_layers);
-    num_layers = config->num_layers;
-    if(!layers) {
-        fprintf(stderr,"malloc TransformLayer failed!\n");
-        exit(EXIT_FAILURE);
-    }
 
     for(int i=0;i<config->num_layers;++i) {
         layers[i].attn_norm.data_type = dtype;
         layers[i].attn_norm.dim = 1;
         layers[i].attn_norm.shape[0] = config->embed_size;
         layers[i].attn_norm.data = (void*)ptr;
-        init_tensor_layout(&layers[i].attn_norm);
         ptr += layers[i].attn_norm.nbytes();
 
         layers[i].q_weight.data_type = dtype;
@@ -196,7 +168,6 @@ void ModelWeights::init(const ModelConfig* config) {
         layers[i].q_weight.shape[0] = config->q_heads * config->head_size;
         layers[i].q_weight.shape[1] = config->embed_size;
         layers[i].q_weight.data = (void*)ptr;
-        init_tensor_layout(&layers[i].q_weight);
         ptr += layers[i].q_weight.nbytes();
 
         layers[i].k_weight.data_type = dtype;
@@ -204,12 +175,10 @@ void ModelWeights::init(const ModelConfig* config) {
         layers[i].k_weight.shape[0] = config->kv_heads * config->head_size;
         layers[i].k_weight.shape[1] = config->embed_size;
         layers[i].k_weight.data = (void*)ptr;
-        init_tensor_layout(&layers[i].k_weight);
         ptr += layers[i].k_weight.nbytes();
 
-        memcpy(&layers[i].v_weight,&layers[i].k_weight,sizeof(Tensor));
+        layers[i].v_weight.copy_meta(&layers[i].k_weight);
         layers[i].v_weight.data = (void*)ptr;
-        init_tensor_layout(&layers[i].v_weight);
         ptr += layers[i].v_weight.nbytes();
 
         layers[i].o_weight.data_type = dtype;
@@ -217,37 +186,32 @@ void ModelWeights::init(const ModelConfig* config) {
         layers[i].o_weight.shape[0] = config->embed_size;
         layers[i].o_weight.shape[1] = config->q_heads * config->head_size;
         layers[i].o_weight.data = (void*)ptr;
-        init_tensor_layout(&layers[i].o_weight);
         ptr += layers[i].o_weight.nbytes();
 
         layers[i].q_norm.data_type = dtype;
         layers[i].q_norm.dim = 1;
         layers[i].q_norm.shape[0] = config->head_size;
         layers[i].q_norm.data = (void*)ptr;
-        init_tensor_layout(&layers[i].q_norm);
         ptr += layers[i].q_norm.nbytes();
 
-        memcpy(&layers[i].k_norm,&layers[i].q_norm,sizeof(Tensor));
+        layers[i].k_norm.copy_meta(&layers[i].q_norm);
         layers[i].k_norm.data = (void*)ptr;
-        init_tensor_layout(&layers[i].k_norm);
         ptr += layers[i].k_norm.nbytes();
 
-        memcpy(&layers[i].ffn_norm,&layers[i].attn_norm,sizeof(Tensor));
+        layers[i].ffn_norm.copy_meta(&layers[i].attn_norm);
         layers[i].ffn_norm.data = (void*)ptr;
-        init_tensor_layout(&layers[i].ffn_norm);
         ptr += layers[i].ffn_norm.nbytes();
         
+        //up and gate weight use bf16 to improve decode speed
         layers[i].up_weight.data_type = dtype;
         layers[i].up_weight.dim = 2;
         layers[i].up_weight.shape[0] = config->ffn_size;
         layers[i].up_weight.shape[1] = config->embed_size;
         layers[i].up_weight.data = (void*)ptr;
-        init_tensor_layout(&layers[i].up_weight);
         ptr += layers[i].up_weight.nbytes();
 
-        memcpy(&layers[i].gate_weight,&layers[i].up_weight,sizeof(Tensor));
+        layers[i].gate_weight.copy_meta(&layers[i].up_weight);
         layers[i].gate_weight.data = (void*)ptr;
-        init_tensor_layout(&layers[i].gate_weight);
         ptr += layers[i].gate_weight.nbytes();
 
         layers[i].down_weight.data_type = dtype;
@@ -255,35 +219,10 @@ void ModelWeights::init(const ModelConfig* config) {
         layers[i].down_weight.shape[0] = config->embed_size;
         layers[i].down_weight.shape[1] = config->ffn_size;
         layers[i].down_weight.data = (void*)ptr;
-        init_tensor_layout(&layers[i].down_weight);
         ptr += layers[i].down_weight.nbytes();
-        
     }
+    ptr = nullptr;
 }
-
-inline void ModelWeights::destory() {
-    free(lm_heads.packed_data);
-    lm_heads.packed_data = nullptr;
-    for (int i = 0; i < num_layers; ++i) {
-        free(layers[i].q_weight.packed_data);
-        free(layers[i].k_weight.packed_data);
-        free(layers[i].v_weight.packed_data);
-        free(layers[i].o_weight.packed_data);
-        free(layers[i].up_weight.packed_data);
-        free(layers[i].gate_weight.packed_data);
-        free(layers[i].down_weight.packed_data);
-    }
-    free(layers);
-    free(data);
-}
-
-void ModelWeights::pack_hot_weights() {
-    for (int i = 0; i < num_layers; ++i) {
-        pack_weight_4col(&layers[i].up_weight);
-        pack_weight_4col(&layers[i].gate_weight);
-    }
-}
-
 
 void ModelWeights::load_tensor(const char* path) {
     size_t size = 0;
@@ -297,8 +236,6 @@ void ModelWeights::load_tensor(const char* path) {
 
     cJSON* json = cJSON_Parse(json_string);
 
-    //printf("%s\n",json_string);
-
     if (json==NULL){
         fprintf(stderr,"Error parsing JSON: %s\n", cJSON_GetErrorPtr());
         free(json_string);
@@ -307,90 +244,110 @@ void ModelWeights::load_tensor(const char* path) {
     }
     void* ptr = (uint8_t*)data + 8 + header_size;
 
-    copy_to_f32(json,"lm_head.weight",ptr,lm_heads.data);
-    copy_to_f32(json,"model.embed_tokens.weight",ptr,embeds.data);
-    copy_to_f32(json,"model.norm.weight",ptr,output_norm.data);
+    copy_data(json,"model.embed_tokens.weight",ptr,&embeds);
+    copy_data(json,"lm_head.weight",ptr,&lm_heads);
+    copy_data(json,"model.norm.weight",ptr,&output_norm);
+
     char name[128] = {0};
     for(int i=0;i<num_layers;++i) {
         sprintf(name,"model.layers.%d.input_layernorm.weight",i);
-        copy_to_f32(json,name,ptr,layers[i].attn_norm.data);
-
-        sprintf(name,"model.layers.%d.self_attn.k_proj.weight",i);
-        copy_to_f32(json,name,ptr,layers[i].k_weight.data);
+        copy_data(json,name,ptr,&layers[i].attn_norm);
 
         sprintf(name,"model.layers.%d.self_attn.q_proj.weight",i);
-        copy_to_f32(json,name,ptr,layers[i].q_weight.data);
+        copy_data(json,name,ptr,&layers[i].q_weight);
 
-        sprintf(name,"model.layers.%d.self_attn.o_proj.weight",i);
-        copy_to_f32(json,name,ptr,layers[i].o_weight.data);
+        sprintf(name,"model.layers.%d.self_attn.k_proj.weight",i);
+        copy_data(json,name,ptr,&layers[i].k_weight);
 
         sprintf(name,"model.layers.%d.self_attn.v_proj.weight",i);
-        copy_to_f32(json,name,ptr,layers[i].v_weight.data);    
-        
-        sprintf(name,"model.layers.%d.self_attn.k_norm.weight",i);
-        copy_to_f32(json,name,ptr,layers[i].k_norm.data);               
+        copy_data(json,name,ptr,&layers[i].v_weight);    
+
+        sprintf(name,"model.layers.%d.self_attn.o_proj.weight",i);
+        copy_data(json,name,ptr,&layers[i].o_weight);
 
         sprintf(name,"model.layers.%d.self_attn.q_norm.weight",i);
-        copy_to_f32(json,name,ptr,layers[i].q_norm.data);   
+        copy_data(json,name,ptr,&layers[i].q_norm);   
+
+        sprintf(name,"model.layers.%d.self_attn.k_norm.weight",i);
+        copy_data(json,name,ptr,&layers[i].k_norm);               
         
         sprintf(name,"model.layers.%d.post_attention_layernorm.weight",i);
-        copy_to_f32(json,name,ptr,layers[i].ffn_norm.data);     
+        copy_data(json,name,ptr,&layers[i].ffn_norm);     
 
         sprintf(name,"model.layers.%d.mlp.up_proj.weight",i);
-        copy_to_f32(json,name,ptr,layers[i].up_weight.data);  
+        copy_data(json,name,ptr,&layers[i].up_weight);  
+       
+        sprintf(name,"model.layers.%d.mlp.gate_proj.weight",i);
+        copy_data(json,name,ptr,&layers[i].gate_weight);
         
         sprintf(name,"model.layers.%d.mlp.down_proj.weight",i);
-        copy_to_f32(json,name,ptr,layers[i].down_weight.data);    
-
-        sprintf(name,"model.layers.%d.mlp.gate_proj.weight",i);
-        copy_to_f32(json,name,ptr,layers[i].gate_weight.data);
+        copy_data(json,name,ptr,&layers[i].down_weight);    
     }
 
-    pack_hot_weights();
+    ptr = nullptr;
 
     cJSON_Delete(json);
     free(json_string);
     memory_unmap(data,size);
 }
 
+inline void ModelWeights::destory() {
+    free(layers);
+    free(data);
+}
+
+
+static inline size_t align_size(size_t size, int align=64) {
+    return (size + align - 1) & ~(align - 1);
+}
 
 void RunTimeMemory::init(const ModelConfig* config, int len){
-    max_prefill_len = len;
+    m_prefill_chunck = len;
     TENSOR_DATA_TYPE data_type = TENSOR_DATA_TYPE_F32;
     size_t dtype_size = get_data_type_size(data_type);
     int kv_elements = config->num_layers * config->kv_heads * config->max_seq_len * config->head_size;
-    size_t kv_dtype_size = get_data_type_size(TENSOR_DATA_TYPE_BF16);
+    size_t kv_dtype_size = get_data_type_size(TENSOR_DATA_TYPE_F32);
     k_data = malloc(kv_elements * kv_dtype_size);
     v_data = malloc(kv_elements * kv_dtype_size);
 
 
     // temp buffer, it dynamic change in the forward process
-    int mha_elements = (config->q_heads * config->head_size * max_prefill_len        //q project temp value
-                        + 2 * config->kv_heads * config->head_size * max_prefill_len //k/v temp value before caching as bf16
-                        + config->q_heads * config->max_seq_len                      //attention score per token
-                        );
+    size_t mha_size = align_size(config->q_heads * config->head_size * m_prefill_chunck * dtype_size, 64); //q project temp value
+        
+    mha_size += align_size(config->q_heads * config->max_seq_len * dtype_size, 64);  //attention score per token
 
-    int mlp_elements = 2 * max_prefill_len * config->ffn_size;                       //up and gate project temp value        
+    size_t mlp_size = 2 * align_size(m_prefill_chunck * config->ffn_size * dtype_size, 64);  //up and gate project temp value        
 
-    int max_elements = (mha_elements > mlp_elements ? mha_elements : mlp_elements);
+    mlp_size += align_size(m_prefill_chunck * config->ffn_size * dtype_size, 64);  // for debug sigmoid(gate) value;
 
-    int inout_elements = max_prefill_len * config->embed_size;                       //layer input and output
+    size_t max_size = (mha_size > mlp_size ? mha_size : mlp_size);
+
+    size_t final_logit_elements = align_size(m_prefill_chunck * config->vocab_size * dtype_size, 64);  //final logit before softmax
+
+    max_size = (max_size > final_logit_elements ? max_size : final_logit_elements);
     
-    ptr = (uint8_t*)malloc((max_elements + 2*inout_elements) * dtype_size);
+    size_t inout_size = align_size(m_prefill_chunck * config->embed_size * dtype_size, 64);  //layer input and output
     
-    if (!k.data || !v.data || !ptr) {
-        fprintf(stderr, "malloc failed!\n");
+    size_t total_size = 2 * inout_size + max_size; // in and out + temp buffer
+
+    ptr = (uint8_t*)malloc(total_size);
+    
+    if (!k_data || !v_data || !ptr) {
+        fprintf(stderr,"%s,%d malloc failed!\n", __FILE__, __LINE__);
         exit(EXIT_FAILURE);
     }
 
     in.data =(void*)ptr;
-    out.data = (void*)(ptr + inout_elements*dtype_size);
-    ptr += 2 * inout_elements * dtype_size;
+    out.data = (void*)(ptr + inout_size);
+
+    ptr += 2 * inout_size;
+    capacity = total_size - 2 * inout_size;
     offset = 0;
+
     seq_len_processed = 0;
     //in.dim = out.dim = 0;
 
-    k_cache.data_type = v_cache.data_type = TENSOR_DATA_TYPE_BF16;
+    k_cache.data_type = v_cache.data_type = TENSOR_DATA_TYPE_F32;
     k_cache.dim = v_cache.dim = 3;
     k_cache.shape[0] = v_cache.shape[0] = 0;
     k_cache.shape[1] = v_cache.shape[1] = config->kv_heads;
@@ -409,46 +366,27 @@ void RunTimeMemory::init(const ModelConfig* config, int len){
 }
 
 void* RunTimeMemory::allocate_kv(int li, int seq_len, const ModelConfig* config,bool is_k) {
-    uint8_t* data = NULL;
-    int dtype_size = get_data_type_size(k_cache.data_type);
+    //uint8_t* data = NULL;
+    //int dtype_size = get_data_type_size(k_cache.data_type);
+    float* data = nullptr;
     if(is_k) {
-        data = (uint8_t*)k_data;
+        data = (float*)k_data;
         k_cache.shape[0] = seq_len + seq_len_processed;
-        k_cache.data = data + li * config->max_seq_len * config->kv_heads * config->head_size * dtype_size;
+        k_cache.data = data + li * config->max_seq_len * config->kv_heads * config->head_size;
     }
     else{
-        data = (uint8_t*)v_data;
+        data = (float*)v_data;
         v_cache.shape[0] = seq_len + seq_len_processed;
-        v_cache.data = data + li * config->max_seq_len * config->kv_heads * config->head_size * dtype_size;
+        v_cache.data = data + li * config->max_seq_len * config->kv_heads * config->head_size;
     }
 
-    uint8_t* res = data
-                + li * config->max_seq_len * config->kv_heads * config->head_size * dtype_size
-                + seq_len_processed * config->kv_heads * config->head_size * dtype_size; 
-    return (void*)res;
+    data += li * config->max_seq_len * config->kv_heads * config->head_size
+                + seq_len_processed * config->kv_heads * config->head_size; 
+    return (void*)data;
 }
-
 
 void RunTimeMemory::destroy() {
     free(k_data);
     free(v_data);
     free(in.data);
-}
-
-
-void RunTimeMemory::reinit(const ModelConfig* config, int len) {
-    if(len >= max_seq_len) {
-        fprintf(stderr, "Error, input length exceed the max length!\n");
-        exit(EXIT_FAILURE);
-    }
-
-    while(max_prefill_len < len) {
-        max_prefill_len *= 2;
-    }
-
-    max_prefill_len = (max_prefill_len < max_seq_len ? max_prefill_len : max_seq_len);
-
-    destroy();
-
-    init(config, max_prefill_len);
 }

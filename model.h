@@ -69,28 +69,30 @@ struct RunTimeMemory {
 
     int seq_len_processed;
 
-    int max_prefill_len;
+    int m_prefill_chunck;    // for prefill, process tokens in chunck to save memory
     int max_seq_len;
 
     uint8_t* ptr;            // temp buffer in runtime
-    int offset;              // ptr - ptr_begin = bytes in use
+    size_t offset;           // current offset in temp buffer
+    size_t capacity;         // total size of temp buffer
 
     void init(const ModelConfig* config, int len);
     void destroy();
-    void* allocate(size_t size);
+    void* allocate(size_t size,size_t align = 64);
     void* allocate_kv(int li, int seq_len, const ModelConfig* config,bool is_k);
-    void reinit(const ModelConfig* config, int len);
     void reset();
     void update_len(int len);
-    //RunTimeMemory(const RunTimeMemory&)=delete;
-    //RunTimeMemory& operator=(const RunTimeMemory&)=delete;
+
 };
 
-
-
-inline void* RunTimeMemory::allocate(size_t size) {
-    void* res = (void*)(ptr + offset);
-    offset += size;
+inline void* RunTimeMemory::allocate(size_t size, size_t align) {
+    size_t p = (offset + align - 1) & ~(align - 1);
+    if (p + size > capacity) {
+        fprintf(stderr, "OOM: offset=%zu size=%zu capacity=%zu\n", p, size, capacity);
+        exit(1);
+    }
+    void* res = ptr + p;
+    offset = p + size;
     return res;
 }
 
@@ -98,8 +100,16 @@ inline void RunTimeMemory::reset() {
     offset = 0;
 }
 
-
 inline void RunTimeMemory::update_len(int len) {
     q.shape[0] = k.shape[0] = v.shape[0] = len;
     up.shape[0] = gate.shape[0] = len;
 }
+
+struct Header {
+    int dim1;
+    int dim2;
+};
+
+void save_logits(const char* filename, float* logits, int m, int n);
+
+

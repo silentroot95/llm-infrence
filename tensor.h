@@ -68,8 +68,7 @@ struct Tensor {
     int dim;
     int shape[MAX_TENSOR_DIM];
     void* data;
-    void* packed_data;
-    int packed_block;
+
 
     inline int nelements() const {
         if(dim<=0) return 0;
@@ -116,6 +115,12 @@ struct Tensor {
         shape[2] = last_dim_size;
         shape[1] =  s1;
         dim = 3;
+    }
+    
+    inline void copy_meta(const Tensor* src) {
+        data_type = src->data_type;
+        dim = src->dim;
+        memcpy(shape, src->shape, sizeof(shape));
     }
 };
 

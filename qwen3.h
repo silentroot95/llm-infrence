@@ -276,7 +276,6 @@ Tensor* Qwen3::forward(const Tensor* token_ids) {
         profile_run(&profile_stats, PROFILE_ADD, [&](){
             add_inplace(&mem->in,&mem->out);
         });
-
     }
 
     //result norm
@@ -298,21 +297,6 @@ Tensor* Qwen3::forward(const Tensor* token_ids) {
                 &mem->final_logits);
     });
     
-    /*
-    mem->reset();
-    mem->up.data = mem->allocate(seq_len_inprocess * model_config->vocab_size * sizeof(float));
-    mem->up.copy_meta(&mem->in);
-    mem->up.shape[0] = seq_len_inprocess;
-    mem->up.shape[1] = model_config->vocab_size;
-
-    matmul( &mem->in,
-            &model_weights->lm_heads,
-            &mem->up);
-    snprintf(logit_filename, sizeof(logit_filename), "./cppbin/final_logits.bin");
-    //save_logits(logit_filename, (float*)mem->out.data, mem->out.shape[0], mem->out.shape[1]);
-    save_logits(logit_filename, (float*)mem->up.data, mem->up.shape[0], mem->up.shape[1]);
-    */
-
     mem->seq_len_processed += seq_len_inprocess;
     return &mem->final_logits;
 }

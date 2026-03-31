@@ -53,7 +53,7 @@ static inline void store_f32_tensor_to_bf16(const Tensor* src, Tensor* dst) {
 static inline void simd_gemv_f32(const float* x, const float* weight, float* out, int hidden_dim, int out_dim) {
     const int block_count = out_dim / 4;
 
-    #pragma omp parallel for if(out_dim >= 2048) schedule(static)
+    #pragma omp parallel for if(out_dim >= 1024) schedule(static)
     for(int bi = 0; bi < block_count; ++bi) {
         const int oi = bi * 4;
         const float* w0 = weight + (oi + 0) * hidden_dim;

@@ -198,6 +198,7 @@ void rms_norm(const Tensor* tb, const Tensor* norm_weight, Tensor* out, float ep
             }
 
             float inv_rms = 1.0f / sqrtf(ss / d + eps);
+            //printf("inv_rms: %f\n", inv_rms);
             assert(inv_rms > 0.0f);
             __m256 v_inv_rms = _mm256_set1_ps(inv_rms);
             
@@ -641,5 +642,297 @@ void mlp(Tensor* up, Tensor* gate) {
     for(int i=0;i<n; ++i) {
         float silu = g_data[i] * stable_sigmoid(g_data[i]);
         u_data[i] *= silu;
+    }
+}
+
+inline float silu(float x) {
+    return x * stable_sigmoid(x);
+}
+
+void up_gate_mlp(const Tensor* in,
+                 const Tensor* up_weight,
+                 const Tensor* gate_weight,
+                 Tensor* up) {
+    
+    int out_size = up_weight->shape[up_weight->dim - 2];
+    int hidden_size = up_weight->shape[up_weight->dim - 1];
+    int seq_len = in->shape[0];
+
+    const float* data = (const float*)in->data;
+    const float* up_weight_data = (const float*)up_weight->data;
+    const float* gate_weight_data = (const float*)gate_weight->data;
+    float* out_data = (float*)up->data; 
+
+    int main_k_end = (out_size / 4) * 4;
+    // decode
+    if (seq_len == 1) {
+        const float* x = data;
+        
+        #if defined(__AVX2__) && defined(__FMA__)
+        #pragma omp parallel for if(out_size >= 512) schedule(static)
+        for(int k = 0; k < out_size - 3; k += 4) {
+            const float* w_u0 = up_weight_data + (k + 0) * hidden_size;
+            const float* w_u1 = up_weight_data + (k + 1) * hidden_size;
+            const float* w_u2 = up_weight_data + (k + 2) * hidden_size;
+            const float* w_u3 = up_weight_data + (k + 3) * hidden_size;
+
+            const float* w_g0 = gate_weight_data + (k + 0) * hidden_size;
+            const float* w_g1 = gate_weight_data + (k + 1) * hidden_size;
+            const float* w_g2 = gate_weight_data + (k + 2) * hidden_size;
+            const float* w_g3 = gate_weight_data + (k + 3) * hidden_size;
+
+            __m256 acc_u0 = _mm256_setzero_ps();
+            __m256 acc_u1 = _mm256_setzero_ps();
+            __m256 acc_u2 = _mm256_setzero_ps();
+            __m256 acc_u3 = _mm256_setzero_ps();
+
+            __m256 acc_g0 = _mm256_setzero_ps();
+            __m256 acc_g1 = _mm256_setzero_ps();
+            __m256 acc_g2 = _mm256_setzero_ps();
+            __m256 acc_g3 = _mm256_setzero_ps();
+
+            int i = 0;
+            for(; i + 7 < hidden_size; i += 8) {
+                __m256 xv = _mm256_loadu_ps(x + i);
+                
+                //  up
+                acc_u0 = _mm256_fmadd_ps(xv, _mm256_loadu_ps(w_u0 + i), acc_u0);
+                acc_u1 = _mm256_fmadd_ps(xv, _mm256_loadu_ps(w_u1 + i), acc_u1);
+                acc_u2 = _mm256_fmadd_ps(xv, _mm256_loadu_ps(w_u2 + i), acc_u2);
+                acc_u3 = _mm256_fmadd_ps(xv, _mm256_loadu_ps(w_u3 + i), acc_u3);
+
+                //  gate
+                acc_g0 = _mm256_fmadd_ps(xv, _mm256_loadu_ps(w_g0 + i), acc_g0);
+                acc_g1 = _mm256_fmadd_ps(xv, _mm256_loadu_ps(w_g1 + i), acc_g1);
+                acc_g2 = _mm256_fmadd_ps(xv, _mm256_loadu_ps(w_g2 + i), acc_g2);
+                acc_g3 = _mm256_fmadd_ps(xv, _mm256_loadu_ps(w_g3 + i), acc_g3);
+            }
+
+            float s_u0 = hsum256_ps(acc_u0);
+            float s_u1 = hsum256_ps(acc_u1);
+            float s_u2 = hsum256_ps(acc_u2);
+            float s_u3 = hsum256_ps(acc_u3);
+
+            float s_g0 = hsum256_ps(acc_g0);
+            float s_g1 = hsum256_ps(acc_g1);
+            float s_g2 = hsum256_ps(acc_g2);
+            float s_g3 = hsum256_ps(acc_g3);
+
+           
+            for(; i < hidden_size; ++i) {
+                float xv = x[i];
+                s_u0 += xv * w_u0[i];
+                s_u1 += xv * w_u1[i];
+                s_u2 += xv * w_u2[i];
+                s_u3 += xv * w_u3[i];
+
+                s_g0 += xv * w_g0[i];
+                s_g1 += xv * w_g1[i];
+                s_g2 += xv * w_g2[i];
+                s_g3 += xv * w_g3[i];
+            }
+
+            // SiLU(gate) * up
+            out_data[k + 0] = silu(s_g0) * s_u0;
+            out_data[k + 1] = silu(s_g1) * s_u1;
+            out_data[k + 2] = silu(s_g2) * s_u2;
+            out_data[k + 3] = silu(s_g3) * s_u3;
+        }
+
+        for(int k = main_k_end; k < out_size; ++k) {
+            const float* w_u = up_weight_data + k * hidden_size;
+            const float* w_g = gate_weight_data + k * hidden_size;
+            
+            __m256 acc_u = _mm256_setzero_ps();
+            __m256 acc_g = _mm256_setzero_ps();
+            
+            int i = 0;
+            for(; i + 7 < hidden_size; i += 8) {
+                __m256 xv = _mm256_loadu_ps(x + i);
+                acc_u = _mm256_fmadd_ps(xv, _mm256_loadu_ps(w_u + i), acc_u);
+                acc_g = _mm256_fmadd_ps(xv, _mm256_loadu_ps(w_g + i), acc_g);
+            }
+
+            float s_u = hsum256_ps(acc_u);
+            float s_g = hsum256_ps(acc_g);
+            for(; i < hidden_size; ++i) {
+                s_u += x[i] * w_u[i];
+                s_g += x[i] * w_g[i];
+            }
+            out_data[k] = silu(s_g) * s_u;
+        }
+
+        #else
+        // Plain C++ fallback for seq_len == 1
+        #pragma omp parallel for if(out_size >= 1024) schedule(static)
+        for(int k=0; k<out_size; ++k) {
+            const float* w_u = up_weight_data + k * hidden_size;
+            const float* w_g = gate_weight_data + k * hidden_size;
+            float sum_u = 0.0f;
+            float sum_g = 0.0f;
+            
+            for(int i=0; i<hidden_size; ++i) {
+                float xv = x[i];
+                sum_u += xv * w_u[i];
+                sum_g += xv * w_g[i];
+            }
+            out_data[k] = silu(sum_g) * sum_u;
+        }
+        #endif
+        return;
+    }
+
+    // prefill
+    #pragma omp parallel for schedule(static)
+    for(int r = 0; r < seq_len; ++r) {
+        float* o = out_data + r * out_size;
+        const float* x = data + r * hidden_size;
+
+        #if defined(__AVX2__) && defined(__FMA__)
+        for(int k = 0; k < out_size-3; k += 4) {
+            const float* w_u0 = up_weight_data + (k + 0) * hidden_size;
+            const float* w_u1 = up_weight_data + (k + 1) * hidden_size;
+            const float* w_u2 = up_weight_data + (k + 2) * hidden_size;
+            const float* w_u3 = up_weight_data + (k + 3) * hidden_size;
+
+            const float* w_g0 = gate_weight_data + (k + 0) * hidden_size;
+            const float* w_g1 = gate_weight_data + (k + 1) * hidden_size;
+            const float* w_g2 = gate_weight_data + (k + 2) * hidden_size;
+            const float* w_g3 = gate_weight_data + (k + 3) * hidden_size;
+
+            __m256 acc_u0 = _mm256_setzero_ps();
+            __m256 acc_u1 = _mm256_setzero_ps();
+            __m256 acc_u2 = _mm256_setzero_ps();
+            __m256 acc_u3 = _mm256_setzero_ps();
+
+            __m256 acc_g0 = _mm256_setzero_ps();
+            __m256 acc_g1 = _mm256_setzero_ps();
+            __m256 acc_g2 = _mm256_setzero_ps();
+            __m256 acc_g3 = _mm256_setzero_ps();
+
+            int i = 0;
+            for(; i + 7 < hidden_size; i += 8) {
+                __m256 xv = _mm256_loadu_ps(x + i);
+                
+                acc_u0 = _mm256_fmadd_ps(xv, _mm256_loadu_ps(w_u0 + i), acc_u0);
+                acc_u1 = _mm256_fmadd_ps(xv, _mm256_loadu_ps(w_u1 + i), acc_u1);
+                acc_u2 = _mm256_fmadd_ps(xv, _mm256_loadu_ps(w_u2 + i), acc_u2);
+                acc_u3 = _mm256_fmadd_ps(xv, _mm256_loadu_ps(w_u3 + i), acc_u3);
+
+                acc_g0 = _mm256_fmadd_ps(xv, _mm256_loadu_ps(w_g0 + i), acc_g0);
+                acc_g1 = _mm256_fmadd_ps(xv, _mm256_loadu_ps(w_g1 + i), acc_g1);
+                acc_g2 = _mm256_fmadd_ps(xv, _mm256_loadu_ps(w_g2 + i), acc_g2);
+                acc_g3 = _mm256_fmadd_ps(xv, _mm256_loadu_ps(w_g3 + i), acc_g3);
+            }
+
+            float s_u0 = hsum256_ps(acc_u0); 
+            float s_u1 = hsum256_ps(acc_u1);
+            float s_u2 = hsum256_ps(acc_u2); 
+            float s_u3 = hsum256_ps(acc_u3);
+            
+            float s_g0 = hsum256_ps(acc_g0); 
+            float s_g1 = hsum256_ps(acc_g1);
+            float s_g2 = hsum256_ps(acc_g2); 
+            float s_g3 = hsum256_ps(acc_g3);
+
+            for(; i < hidden_size; ++i) {
+                float xv = x[i];
+                s_u0 += xv * w_u0[i]; s_u1 += xv * w_u1[i];
+                s_u2 += xv * w_u2[i]; s_u3 += xv * w_u3[i];
+
+                s_g0 += xv * w_g0[i]; s_g1 += xv * w_g1[i];
+                s_g2 += xv * w_g2[i]; s_g3 += xv * w_g3[i];
+            }
+
+            o[k + 0] = silu(s_g0) * s_u0;
+            o[k + 1] = silu(s_g1) * s_u1;
+            o[k + 2] = silu(s_g2) * s_u2;
+            o[k + 3] = silu(s_g3) * s_u3;
+        }
+
+        for(int k = main_k_end; k < out_size; ++k) {
+            const float* w_u = up_weight_data + k * hidden_size;
+            const float* w_g = gate_weight_data + k * hidden_size;
+            __m256 acc_u = _mm256_setzero_ps();
+            __m256 acc_g = _mm256_setzero_ps();
+            int i = 0;
+            for(; i + 7 < hidden_size; i += 8) {
+                __m256 xv = _mm256_loadu_ps(x + i);
+                acc_u = _mm256_fmadd_ps(xv, _mm256_loadu_ps(w_u + i), acc_u);
+                acc_g = _mm256_fmadd_ps(xv, _mm256_loadu_ps(w_g + i), acc_g);
+            }
+            float s_u = hsum256_ps(acc_u);
+            float s_g = hsum256_ps(acc_g);
+            for(; i < hidden_size; ++i) {
+                s_u += x[i] * w_u[i];
+                s_g += x[i] * w_g[i];
+            }
+            o[k] = silu(s_g) * s_u;
+        }
+
+        #else
+        for(int k=0; k<out_size; ++k) {
+            const float* w_u = up_weight_data + k * hidden_size;
+            const float* w_g = gate_weight_data + k * hidden_size;
+            float sum_u = 0.0f;
+            float sum_g = 0.0f;
+            for(int i=0; i<hidden_size; ++i) {
+                float xv = x[i];
+                sum_u += xv * w_u[i];
+                sum_g += xv * w_g[i];
+            }
+            o[k] = silu(sum_g) * sum_u;
+        }
+        #endif
+    }
+}
+
+void matmul_w8a32(const Tensor* in, const QuantizedWeightINT8* q_weight, Tensor* out) {
+    int out_size = q_weight->shape[q_weight->dim - 2];
+    int hidden_size = q_weight->shape[q_weight->dim - 1];
+
+    const float* x = (const float*)in->data;
+    float* out_data = (float*)out->data;
+    const int8_t* q_weight_data = q_weight->q_weight;
+    const float* scales = q_weight->scales;
+
+    #pragma omp parallel for schedule(static)
+    for (int k = 0; k < out_size; ++k) {
+        const int8_t* w_row = q_weight_data + k * hidden_size;
+        float row_scale = scales[k];
+        
+        #if defined(__AVX2__) && defined(__FMA__)
+        __m256 acc = _mm256_setzero_ps();
+        int i = 0;
+        
+        for (; i + 7 < hidden_size; i += 8) {
+            // load x
+            __m256 xv = _mm256_loadu_ps(x + i);
+            
+            //loas q_weight
+            __m128i w8 = _mm_loadl_epi64((const __m128i*)(w_row + i));
+            // convert INT8 to INT32
+            __m256i w32 = _mm256_cvtepi8_epi32(w8);
+            // convert INT32 to FP32
+            __m256 wf = _mm256_cvtepi32_ps(w32);
+            
+            acc = _mm256_fmadd_ps(xv, wf, acc);
+        }
+        
+        float sum = hsum256_ps(acc);
+        
+        for (; i < hidden_size; ++i) {
+            sum += x[i] * (float)w_row[i];
+        }
+        
+        out_data[k] = sum * row_scale;
+        
+        #else
+        float sum = 0.0f;
+        for (int i = 0; i < hidden_size; ++i) {
+            sum += x[i] * (float)w_row[i];
+        }
+        out_data[k] = sum * row_scale;
+        #endif
     }
 }

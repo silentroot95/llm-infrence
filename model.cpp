@@ -1,5 +1,6 @@
 
 #include <assert.h>
+#include <math.h>
 #include "cJSON.h"
 
 
@@ -67,6 +68,18 @@ void ModelConfig::load_config(const char* path) {
 }
 
 
+static void* get_data_ptr(const cJSON* json,const char* name, void* begin_ptr) {
+    cJSON* tensor_info = cJSON_GetObjectItemCaseSensitive(json,name);
+    cJSON* data_offsets = cJSON_GetObjectItemCaseSensitive(tensor_info, "data_offsets");
+
+    assert(cJSON_IsArray(data_offsets));
+    assert(cJSON_GetArraySize(data_offsets)==2);
+
+    uint64_t offset = cJSON_GetArrayItem(data_offsets,0)->valuedouble;
+    return (uint8_t*)begin_ptr  + offset;
+}
+
+
 static void copy_data(const cJSON* json,const char* name,void* begin_ptr, Tensor* dst) {
     cJSON* tensor_info = cJSON_GetObjectItemCaseSensitive(json,name);
     cJSON* dtype = cJSON_GetObjectItemCaseSensitive(tensor_info,"dtype");
@@ -104,14 +117,46 @@ static void copy_data(const cJSON* json,const char* name,void* begin_ptr, Tensor
     }
 }
 
+// convert fp32 weight to int8 quantized weight, using per-row quantization
+void quantize_row_q8_0(const uint16_t* bf16_weight, QuantizedWeightINT8* q_out) {
+    int rows = q_out->shape[0];
+    int cols = q_out->shape[1];
+
+    #pragma omp parallel for
+    for (int r = 0; r < rows; ++r) {
+        const uint16_t* row_data = bf16_weight + r * cols;
+        int8_t* q_row_data = q_out->q_weight + r * cols;
+        
+        float max_val = 0.0f;
+        for (int i = 0; i < cols; ++i) {
+            float abs_val = fabsf(bf16_to_f32(row_data[i]));
+            if (abs_val > max_val) {
+                max_val = abs_val;
+            }
+        }
+
+        // calculate scale for this row, and store it
+        float scale = max_val / 127.0f;
+        q_out->scales[r] = scale;
+
+        // quantize the row using the scale, and store in q_row_data
+        float inv_scale = (scale == 0.0f) ? 0.0f : 1.0f / scale;
+        for (int i = 0; i < cols; ++i) {
+            int q_val = (int)roundf(bf16_to_f32(row_data[i]) * inv_scale);
+            if (q_val > 127) q_val = 127;
+            if (q_val < -127) q_val = -127;
+            q_row_data[i] = (int8_t)q_val;
+        }
+    }
+}
+
 
 void ModelWeights::init(const ModelConfig* config) {
     TENSOR_DATA_TYPE dtype = TENSOR_DATA_TYPE_F32;
     size_t dtype_size = get_data_type_size(dtype);
-    //size_t bf16_dtype_size = get_data_type_size(TENSOR_DATA_TYPE_BF16);
 
     size_t f32_elements = (
-        2*config->embed_size * config->vocab_size                               //embed and lm_head 
+        config->embed_size * config->vocab_size                                 //embed
         + config->embed_size                                                    //final_norm
         + config->num_layers*(
             2*config->embed_size                                                //attntion norm and ffn norm
@@ -122,7 +167,10 @@ void ModelWeights::init(const ModelConfig* config) {
         )
     );
 
-    data = malloc(dtype_size * f32_elements );
+    size_t lm_head_size = config->embed_size * config->vocab_size * sizeof(int8_t) 
+                          + config->vocab_size * sizeof(float);                 // lm_head int8 weight
+
+    data = malloc(dtype_size * f32_elements +  lm_head_size);
 
     if(!data) {
         fprintf(stderr,"%s,%d malloc failed!\n", __FILE__, __LINE__);
@@ -145,9 +193,13 @@ void ModelWeights::init(const ModelConfig* config) {
     embeds.data = (void*)ptr;
     ptr += embeds.nbytes();
     
-    lm_heads.copy_meta(&embeds);
-    lm_heads.data = (void*)ptr;
-    ptr += lm_heads.nbytes();
+    lm_heads.dim = 2;
+    lm_heads.shape[0] = config->vocab_size;
+    lm_heads.shape[1] = config->embed_size;
+    lm_heads.q_weight = (int8_t*)ptr;
+    ptr += config->vocab_size * config->embed_size * sizeof(int8_t);
+    lm_heads.scales = (float*)ptr;
+    ptr += config->vocab_size * sizeof(float);
 
     output_norm.data_type = dtype;
     output_norm.dim = 1;
@@ -243,7 +295,9 @@ void ModelWeights::load_tensor(const char* path) {
     void* ptr = (uint8_t*)data + 8 + header_size;
 
     copy_data(json,"model.embed_tokens.weight",ptr,&embeds);
-    copy_data(json,"lm_head.weight",ptr,&lm_heads);
+    const uint16_t* lm_head_weight_data = (uint16_t*)get_data_ptr(json,"lm_head.weight",ptr);
+    quantize_row_q8_0(lm_head_weight_data, &lm_heads);
+    //copy_data(json,"lm_head.weight",ptr,&lm_heads);
     copy_data(json,"model.norm.weight",ptr,&output_norm);
 
     char name[128] = {0};

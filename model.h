@@ -2,6 +2,7 @@
 
 #include "tensor.h"
 
+
 struct ModelConfig {
     int max_seq_len;    //max sequence length
     int embed_size;     //embedding size
@@ -37,7 +38,7 @@ struct TransformerLayer {
 struct ModelWeights {
     Tensor embeds;
     Tensor output_norm;
-    Tensor lm_heads;
+    QuantizedWeightINT8 lm_heads;
     TransformerLayer* layers;
     void* data;
 
@@ -45,7 +46,6 @@ struct ModelWeights {
 
     void init(const ModelConfig* config);
     inline void destory();
-    void pack_hot_weights();
     void load_tensor(const char* path);
 };
 

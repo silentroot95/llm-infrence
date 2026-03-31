@@ -23,6 +23,13 @@ void matmul(const Tensor* tb,const Tensor* weight , Tensor* out);
 
 void mlp(Tensor* up, Tensor* gate);
 
+void up_gate_mlp(const Tensor* in,
+                 const Tensor* up_weight,
+                 const Tensor* gate_weight,
+                 Tensor* up);
+
+void matmul_w8a32(const Tensor* in, const QuantizedWeightINT8* q_weight, Tensor* out);
+
 inline void add_inplace(const Tensor* in,const Tensor* param) {
     // assert(in->nelements() == param->nelements());
     float* in_data = (float*)in->data;
@@ -54,4 +61,3 @@ inline int argmax(const Tensor* logits) {
     }
     return max_id;
 }
-

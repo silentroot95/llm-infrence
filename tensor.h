@@ -124,4 +124,10 @@ struct Tensor {
     }
 };
 
-
+// INT8A32 Quantized weight struct, using per-row quantization
+struct QuantizedWeightINT8 {
+    int8_t* q_weight; 
+    float*  scales;   
+    int dim;
+    int shape[MAX_TENSOR_DIM];       
+};

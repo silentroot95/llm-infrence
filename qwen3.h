@@ -206,14 +206,6 @@ Tensor* Qwen3::forward(const Tensor* token_ids) {
                      &mem->out);
         });
 
-        #if defined(_DEBUG)
-        snprintf(logit_filename, sizeof(logit_filename), "./cppbin/attnout_%d.bin", i);
-        save_logits(logit_filename, (float*)mem->q.data, mem->q.shape[0], mem->q.shape[1]);
-
-        snprintf(logit_filename, sizeof(logit_filename), "./cppbin/o_%d.bin", i);
-        save_logits(logit_filename, (float*)mem->out.data, mem->out.shape[0], mem->out.shape[1]);
-        #endif
-
         //residual connect
         profile_run(&profile_stats, PROFILE_ADD, [&](){
             add_inplace(&mem->in,&mem->out);
@@ -231,8 +223,17 @@ Tensor* Qwen3::forward(const Tensor* token_ids) {
         mem->reset();
         size_t up_gate_size = model_config->ffn_size * seq_len_inprocess * sizeof(float);
         mem->up.data = mem->allocate(up_gate_size);
-        mem->gate.data = mem->allocate(up_gate_size);
+        //mem->gate.data = mem->allocate(up_gate_size);
+        profile_run(&profile_stats, PROFILE_MATMUL_FFN_UP_GATE, [&](){
+            up_gate_mlp(&mem->out,
+                        &model_weights->layers[i].up_weight,
+                        &model_weights->layers[i].gate_weight,
+                        &mem->up);
+        });
 
+
+        /**
+         * 
         //gate project
         profile_run(&profile_stats, PROFILE_MATMUL_FFN_UP_GATE, [&](){
             matmul( &mem->out,
@@ -252,6 +253,7 @@ Tensor* Qwen3::forward(const Tensor* token_ids) {
             mlp(&mem->up,
                 &mem->gate);
         });
+         */
 
         /*
         matmul( &mem->out,
@@ -292,7 +294,7 @@ Tensor* Qwen3::forward(const Tensor* token_ids) {
 
     Tensor last = mem->in.peek_at(mem->in.shape[0]-1);
     profile_run(&profile_stats, PROFILE_MATMUL_LM_HEAD, [&](){
-        matmul( &last,
+        matmul_w8a32( &last,
                 &model_weights->lm_heads,
                 &mem->final_logits);
     });

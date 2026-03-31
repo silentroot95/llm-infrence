@@ -64,31 +64,40 @@ int main() {
     Sampler sampler(model_config.vocab_size, 0.6,0.95,20);
 
 
-    Tensor tokens;
-    tokens.data_type = TENSOR_DATA_TYPE_INT32;
-    tokens.dim = 1;
-    tokens.shape[0] = token_ids.size();
-    tokens.data = (void*)token_ids.data();
-    int prefill_tokens = tokens.shape[0];
-
-    qwen3.reset_profile();
-    auto step_start = std::chrono::high_resolution_clock::now();
-    Tensor* logits = qwen3.forward(&tokens);
-    auto step_end = std::chrono::high_resolution_clock::now();
-    double prefill_ms = std::chrono::duration<double, std::milli>(step_end - step_start).count();
-    double prefill_tps = prefill_ms > 0.0 ? (1000.0 * prefill_tokens / prefill_ms) : 0.0;
-
-    printf("\n\n[Perf] prefill: %d tokens, %.2f ms, %.2f tokens/s\n",
-           prefill_tokens, prefill_ms, prefill_tps);
-    qwen3.print_profile("prefill");
+    Tensor chunk;
+    chunk.data_type = TENSOR_DATA_TYPE_INT32;
+    chunk.dim = 1;
     
-    int decode_tokens = 0;
-    double decode_ms = 0.0;  
+    Tensor* logits = nullptr;
+    //prefill
     qwen3.reset_profile();
+    int processed_tokens = 0;
+    auto step_start = std::chrono::high_resolution_clock::now();
+    while(1) {
+        int chunk_size = std::min(prefill_chunk, (int)token_ids.size() - processed_tokens);
+        chunk.shape[0] = chunk_size;
+        chunk.data = (void*)(token_ids.data() + processed_tokens);
+        logits = qwen3.forward(&chunk);
+        processed_tokens += chunk_size;
+        
+        if(processed_tokens >= token_ids.size()) {
+            auto step_end = std::chrono::high_resolution_clock::now();
+            double prefill_ms = std::chrono::duration<double, std::milli>(step_end - step_start).count();
+            double prefill_tps = prefill_ms > 0.0 ? (1000.0 * processed_tokens / prefill_ms) : 0.0;
 
+            printf("\n\n[Perf] prefill: %d tokens, %.2f ms, %.2f tokens/s\n",
+                processed_tokens, prefill_ms, prefill_tps);
+            qwen3.print_profile("prefill");
+            break;
+        }
+    }
+
+    //decode
+    int decode_tokens = 0;
+    double decode_ms = 0.0;
+    qwen3.reset_profile();
     while (1) {
-        int next_token  = sampler.sample(logits, true);
-
+        int next_token = sampler.sample(logits, true);
         if (is_eos(next_token, tk.eos_token_id) || 
             memory.seq_len_processed >= model_config.max_seq_len ||
             decode_tokens >= 800) {
@@ -98,11 +107,11 @@ int main() {
         std::string next_s = tk.decode(next_token);
         printf("%s",next_s.c_str());
         fflush(stdout);
-        update_next_token(next_token, &tokens);
+        update_next_token(next_token, &chunk);
 
-        step_start = std::chrono::high_resolution_clock::now();
-        logits = qwen3.forward(&tokens);
-        step_end = std::chrono::high_resolution_clock::now();
+        auto step_start = std::chrono::high_resolution_clock::now();
+        logits = qwen3.forward(&chunk);
+        auto step_end = std::chrono::high_resolution_clock::now();
         decode_ms += std::chrono::duration<double, std::milli>(step_end - step_start).count();
         decode_tokens += 1;
     }

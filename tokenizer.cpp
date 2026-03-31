@@ -4,6 +4,8 @@
 #include <cctype>
 #include <cmath>
 #include <stdexcept>
+#include <random>
+#include <time.h>
 
 #include "cJSON.h"
 
@@ -667,7 +669,9 @@ int Sampler::sample(const Tensor* data, bool do_sample) {
 int Sampler::sample_multinomial(const std::vector<int>& idx,
                                 const std::vector<float>& p) {
 
-    float r = (float)rand() / RAND_MAX;
+    std::mt19937 rng(time(NULL));
+    std::uniform_real_distribution<float> dist(0.0f, 1.0f);
+    float r = dist(rng);
 
     float cumulative = 0.0f;
     for (size_t i = 0; i < p.size(); i++) {
@@ -676,6 +680,8 @@ int Sampler::sample_multinomial(const std::vector<int>& idx,
             return idx[i];
         }
     }
+
+
 
     return idx.back();
 }

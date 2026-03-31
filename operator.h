@@ -2,7 +2,7 @@
 
 struct Tensor;
 
-void softmax(float* x, int pos, float t=1.0);
+void softmax(float* x, int len, float t=1.0);
 
 void embed(const Tensor* tokens, const Tensor* embed_weight, Tensor* out);
 

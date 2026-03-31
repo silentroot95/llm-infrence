@@ -106,30 +106,15 @@ inline void Qwen3::print_profile(const char* stage_name) const {
 
 Tensor* Qwen3::forward(const Tensor* token_ids) {
     int seq_len_inprocess = token_ids->shape[0];
-    //mem->update_len(seq_len_inprocess);
-    char logit_filename[256];
-
-    mem->in.shape[0] = seq_len_inprocess;
-    mem->in.shape[1] = model_config->embed_size;
-    mem->in.dim = 2;
-    mem->in.data_type = TENSOR_DATA_TYPE_F32;
+    mem->update_len(seq_len_inprocess);
+    //char logit_filename[256];
 
     profile_run(&profile_stats, PROFILE_EMBED, [&](){
         embed(token_ids,&model_weights->embeds,&mem->in);
     });
 
-    #define DEBUG 1
-
-    mem->v_cache.shape[0] = mem->k_cache.shape[0] = mem->seq_len_processed + seq_len_inprocess;
-    mem->v_cache.shape[1] = mem->k_cache.shape[1] = model_config->kv_heads;
-    mem->v_cache.shape[2] = mem->k_cache.shape[2] = model_config->head_size;
-    mem->v_cache.dim = mem->k_cache.dim = 3;
-    mem->v_cache.data_type = mem->k_cache.data_type = TENSOR_DATA_TYPE_F32;
-
     for(int i=0; i<model_config->num_layers;++i) {
         
-        mem->out.copy_meta(&mem->in);
-
         profile_run(&profile_stats, PROFILE_RMS_NORM, [&](){
             rms_norm(&mem->in,
                      &model_weights->layers[i].attn_norm,
@@ -137,39 +122,16 @@ Tensor* Qwen3::forward(const Tensor* token_ids) {
                      model_config->rms_norm_eps);
         });
 
-        #if defined(DEBUG)
-        snprintf(logit_filename, sizeof(logit_filename), "./cppbin/input_%d.bin", i);
-        save_logits(logit_filename, (float*)mem->in.data, mem->in.shape[0], mem->in.shape[1]);
-        snprintf(logit_filename, sizeof(logit_filename), "./cppbin/input_norm_%d.bin", i);
-        save_logits(logit_filename, (float*)mem->out.data, mem->out.shape[0], mem->out.shape[1]);
-        #endif
-
         //Q,K,V project
+        //q [seqlen, q_head*head_size], allocate from temp buffer
         mem->reset();
-        //q [seqlen, q_head*head_size], q allocate from temp buffer
         mem->q.data = mem->allocate(model_config->q_heads * 
                                     model_config->head_size *
                                     seq_len_inprocess * sizeof(float));
-        // k v use f32 temp buffers first, then store to bf16 cache after rope.
-        /*
-        mem->k.data = mem->allocate(model_config->kv_heads *
-                                    model_config->head_size *
-                                    seq_len_inprocess * sizeof(float));
-        mem->v.data = mem->allocate(model_config->kv_heads *
-                                    model_config->head_size *
-                                    seq_len_inprocess * sizeof(float));
-        */
-
+                            
+        //k v allocate from the k v cache
         mem->k.data = mem->allocate_kv(i, seq_len_inprocess, model_config, true);
         mem->v.data = mem->allocate_kv(i, seq_len_inprocess, model_config, false);
-
-        mem->q.copy_meta(&mem->out);
-        mem->k.copy_meta(&mem->out);
-        mem->v.copy_meta(&mem->out);
-
-        mem->q.shape[1] = model_config->q_heads * model_config->head_size;
-        mem->v.shape[1] = mem->k.shape[1] = model_config->kv_heads * model_config->head_size;
-
 
         profile_run(&profile_stats, PROFILE_MATMUL_QKV, [&](){
             matmul(&mem->out,
@@ -189,19 +151,9 @@ Tensor* Qwen3::forward(const Tensor* token_ids) {
                     &mem->q);
         });
 
-        #if defined(DEBUG)
-        snprintf(logit_filename, sizeof(logit_filename), "./cppbin/k_%d.bin", i);
-        save_logits(logit_filename, (float*)mem->k.data, mem->k.shape[0], mem->k.shape[1]);
-        snprintf(logit_filename, sizeof(logit_filename), "./cppbin/v_%d.bin", i);
-        save_logits(logit_filename, (float*)mem->v.data, mem->v.shape[0], mem->v.shape[1]);
-        snprintf(logit_filename, sizeof(logit_filename), "./cppbin/q_%d.bin", i);
-        save_logits(logit_filename, (float*)mem->q.data, mem->q.shape[0], mem->q.shape[1]);
-        #endif
-
-        //Q,K,V reshape to n_head*head_size
+        //Q,K reshape to n_head*head_size
         mem->k.reshape_3d(model_config->head_size);
         mem->q.reshape_3d(model_config->head_size);
-        mem->v.reshape_3d(model_config->head_size);
         
         //Q,K norm inplace
         profile_run(&profile_stats, PROFILE_RMS_NORM, [&](){
@@ -218,13 +170,6 @@ Tensor* Qwen3::forward(const Tensor* token_ids) {
                     model_config->rms_norm_eps);
         });
 
-        #if defined(DEBUG)
-        snprintf(logit_filename, sizeof(logit_filename), "./cppbin/k_norm_%d.bin", i);
-        save_logits(logit_filename, (float*)mem->k.data, mem->k.shape[0], mem->k.shape[1]*mem->k.shape[2]);
-        snprintf(logit_filename, sizeof(logit_filename), "./cppbin/q_norm_%d.bin", i);
-        save_logits(logit_filename, (float*)mem->q.data, mem->q.shape[0], mem->q.shape[1]*mem->q.shape[2]);
-        #endif
-
         //Q,K rope inplace
         profile_run(&profile_stats, PROFILE_ROPE, [&](){
             rope(&mem->k,
@@ -237,33 +182,11 @@ Tensor* Qwen3::forward(const Tensor* token_ids) {
                 model_config->rope_theta,
                 mem->seq_len_processed);
         });
-
-        #if defined(DEBUG)
-        snprintf(logit_filename, sizeof(logit_filename), "./cppbin/k_rope_%d.bin", i);
-        save_logits(logit_filename, (float*)mem->k.data, mem->k.shape[0], mem->k.shape[1]*mem->k.shape[2]);
-        snprintf(logit_filename, sizeof(logit_filename), "./cppbin/q_rope_%d.bin", i);
-        save_logits(logit_filename, (float*)mem->q.data, mem->q.shape[0], mem->q.shape[1]*mem->q.shape[2]);
-        #endif
-
-        /**
-        kv_cache_dst.data = mem->allocate_kv(i, seq_len_inprocess, model_config, true);
-        profile_run(&profile_stats, PROFILE_STORE_BF16, [&](){
-            store_f32_tensor_to_bf16(&mem->k, &kv_cache_dst);
-        });
-
-        kv_cache_dst.data = mem->allocate_kv(i, seq_len_inprocess, model_config, false);
-        profile_run(&profile_stats, PROFILE_STORE_BF16, [&](){
-            store_f32_tensor_to_bf16(&mem->v, &kv_cache_dst);
-        });
-         */
         
         //attn_score shape [q_head, seq_len], for attention score of one token 
         float* att_score = (float*)mem->allocate(model_config->q_heads*
                                                 (seq_len_inprocess + mem->seq_len_processed) * sizeof(float));
         //QKV multi head attention
-        //mem->out now is free so we can reuse it
-
-
         profile_run(&profile_stats, PROFILE_ATTENTION, [&](){
             attention(  &mem->q,
                         &mem->k_cache,
@@ -271,20 +194,19 @@ Tensor* Qwen3::forward(const Tensor* token_ids) {
                         mem->seq_len_processed,
                         att_score);
         });
-        
+
+        //the attention result in mem->q
         mem->q.reshape_2d();
-
-
-        mem->out.copy_meta(&mem->q);
-        mem->out.shape[1] = model_config->embed_size;
-
+        mem->k.reshape_2d();
+        
+        //mem->out now is free so we can reuse it
         profile_run(&profile_stats, PROFILE_MATMUL_O, [&](){
             matmul(  &mem->q,
                      &model_weights->layers[i].o_weight,
                      &mem->out);
         });
 
-        #if defined(DEBUG)
+        #if defined(_DEBUG)
         snprintf(logit_filename, sizeof(logit_filename), "./cppbin/attnout_%d.bin", i);
         save_logits(logit_filename, (float*)mem->q.data, mem->q.shape[0], mem->q.shape[1]);
 
@@ -297,8 +219,6 @@ Tensor* Qwen3::forward(const Tensor* token_ids) {
             add_inplace(&mem->in,&mem->out);
         });
         
-        mem->out.copy_meta(&mem->in);
-
         //ffn norm
         profile_run(&profile_stats, PROFILE_RMS_NORM, [&](){
             rms_norm(&mem->in,
@@ -307,94 +227,50 @@ Tensor* Qwen3::forward(const Tensor* token_ids) {
                      model_config->rms_norm_eps);
         });
 
-        #if defined(DEBUG)
-        snprintf(logit_filename, sizeof(logit_filename), "./cppbin/ffn_norm_in_%d.bin", i);
-        save_logits(logit_filename, (float*)mem->in.data, mem->in.shape[0], mem->in.shape[1]);
-        snprintf(logit_filename, sizeof(logit_filename), "./cppbin/ffn_norm_out_%d.bin", i);
-        save_logits(logit_filename, (float*)mem->out.data, mem->out.shape[0], mem->out.shape[1]);
-        #endif
-        
-        
-        /**
-        profile_run(&profile_stats, PROFILE_MATMUL_FFN_UP_GATE, [&](){
-            matmul_pair(&mem->out,
-                        &model_weights->layers[i].up_weight,
-                        &mem->up,
-                        &model_weights->layers[i].gate_weight,
-                        &mem->gate);
-        });
-         */
-
-        
-        //mem->up mem->gate  data is in temp buffer
+        //mem->up mem->gate allocate from temp buffer
         mem->reset();
-
         size_t up_gate_size = model_config->ffn_size * seq_len_inprocess * sizeof(float);
         mem->up.data = mem->allocate(up_gate_size);
         mem->gate.data = mem->allocate(up_gate_size);
 
-        mem->gate.copy_meta(&mem->out);
-        mem->up.copy_meta(&mem->out);
-        mem->up.shape[1] = mem->gate.shape[1] = model_config->ffn_size;
-
-        /*
+        //gate project
         profile_run(&profile_stats, PROFILE_MATMUL_FFN_UP_GATE, [&](){
             matmul( &mem->out,
                     &model_weights->layers[i].gate_weight,
                     &mem->gate);
         });
-        */
-
-        matmul( &mem->out,
-                            &model_weights->layers[i].gate_weight,
-                            &mem->gate);
-
-        snprintf(logit_filename, sizeof(logit_filename), "./cppbin/gate_%d.bin", i);
-        save_logits(logit_filename, (float*)mem->gate.data, mem->gate.shape[0], mem->gate.shape[1]);
-
-        matmul( &mem->out,
-                    &model_weights->layers[i].up_weight,
-                    &mem->up);
-
-
-
-        snprintf(logit_filename, sizeof(logit_filename), "./cppbin/up_%d.bin", i);
-        save_logits(logit_filename, (float*)mem->up.data, mem->up.shape[0], mem->up.shape[1]);
-
-        /*
+        
+        //up project
         profile_run(&profile_stats, PROFILE_MATMUL_FFN_UP_GATE, [&](){
             matmul( &mem->out,
                     &model_weights->layers[i].up_weight,
                     &mem->up);
         });
-        */  
-        /**
+        
+        //silu(gate)*up
         profile_run(&profile_stats, PROFILE_MLP, [&](){
             mlp(&mem->up,
                 &mem->gate);
         });
-         */
-        mlp(&mem->up,
+
+        /*
+        matmul( &mem->out,
+                &model_weights->layers[i].gate_weight,
                 &mem->gate);
 
-        #if defined(DEBUG)
-        snprintf(logit_filename, sizeof(logit_filename), "./cppbin/ug_%d.bin", i);
-        save_logits(logit_filename, (float*)mem->up.data, mem->up.shape[0], mem->up.shape[1]);
-        #endif
+        matmul( &mem->out,
+                &model_weights->layers[i].up_weight,
+                &mem->up);
+        mlp(&mem->up,
+            &mem->gate);
+         */
 
-        mem->out.copy_meta(&mem->up);
-        mem->out.shape[1] = model_config->embed_size;
-
+        // down project
         profile_run(&profile_stats, PROFILE_MATMUL_FFN_DOWN, [&](){
             matmul( &mem->up,
                     &model_weights->layers[i].down_weight,
                     &mem->out);
         });
-
-        #if defined(DEBUG)
-        snprintf(logit_filename, sizeof(logit_filename), "./cppbin/ffn_out_%d.bin", i);
-        save_logits(logit_filename, (float*)mem->out.data, mem->out.shape[0], mem->out.shape[1]);
-        #endif
 
         //residual connect
         profile_run(&profile_stats, PROFILE_ADD, [&](){
@@ -402,11 +278,6 @@ Tensor* Qwen3::forward(const Tensor* token_ids) {
         });
 
     }
-
-    #if defined(DEBUG)
-    snprintf(logit_filename, sizeof(logit_filename), "./cppbin/output.bin");
-    save_logits(logit_filename, (float*)mem->in.data, mem->in.shape[0], mem->in.shape[1]);
-    #endif
 
     //result norm
     profile_run(&profile_stats, PROFILE_RMS_NORM, [&](){
@@ -416,30 +287,17 @@ Tensor* Qwen3::forward(const Tensor* token_ids) {
                  model_config->rms_norm_eps);
     });
 
-    #if defined(DEBUG)
-    snprintf(logit_filename, sizeof(logit_filename), "./cppbin/output_norm.bin");
-    save_logits(logit_filename, (float*)mem->in.data, mem->in.shape[0], mem->in.shape[1]);
-    #endif
-
     //final logits, we only get the last token output
     mem->reset();
-    mem->up.data = mem->allocate(1 * model_config->vocab_size * sizeof(float));
-    mem->up.copy_meta(&mem->in);
-    mem->up.shape[0] = 1;
-    mem->up.shape[1] = model_config->vocab_size;
+    mem->final_logits.data = mem->allocate(1 * model_config->vocab_size * sizeof(float));
 
     Tensor last = mem->in.peek_at(mem->in.shape[0]-1);
     profile_run(&profile_stats, PROFILE_MATMUL_LM_HEAD, [&](){
         matmul( &last,
                 &model_weights->lm_heads,
-                &mem->up);
+                &mem->final_logits);
     });
     
-    #if defined(DEBUG)
-    snprintf(logit_filename, sizeof(logit_filename), "./cppbin/final_logits.bin");
-    save_logits(logit_filename, (float*)mem->up.data, mem->up.shape[0], mem->up.shape[1]);
-    #endif
-
     /*
     mem->reset();
     mem->up.data = mem->allocate(seq_len_inprocess * model_config->vocab_size * sizeof(float));
@@ -453,11 +311,9 @@ Tensor* Qwen3::forward(const Tensor* token_ids) {
     snprintf(logit_filename, sizeof(logit_filename), "./cppbin/final_logits.bin");
     //save_logits(logit_filename, (float*)mem->out.data, mem->out.shape[0], mem->out.shape[1]);
     save_logits(logit_filename, (float*)mem->up.data, mem->up.shape[0], mem->up.shape[1]);
-    
     */
 
     mem->seq_len_processed += seq_len_inprocess;
-
-    return &mem->up;
+    return &mem->final_logits;
 }
 

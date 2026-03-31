@@ -7,7 +7,7 @@
 
 
 
-#if defined(__AVX2__)
+#if (defined(__AVX2__) && defined(__FMA__))
 static inline float hsum256_ps(__m256 v) {
     __m128 vlow  = _mm256_castps256_ps128(v);
     __m128 vhigh = _mm256_extractf128_ps(v, 1);
@@ -53,7 +53,7 @@ static inline void store_f32_tensor_to_bf16(const Tensor* src, Tensor* dst) {
 static inline void simd_gemv_f32(const float* x, const float* weight, float* out, int hidden_dim, int out_dim) {
     const int block_count = out_dim / 4;
 
-    //#pragma omp parallel for if(out_dim >= 8192) schedule(static)
+    #pragma omp parallel for if(out_dim >= 8192) schedule(static)
     for(int bi = 0; bi < block_count; ++bi) {
         const int oi = bi * 4;
         const float* w0 = weight + (oi + 0) * hidden_dim;
@@ -113,21 +113,21 @@ static inline void simd_gemv_f32(const float* x, const float* weight, float* out
 #endif
 
 
-void softmax(float* x, int pos, float t=1.0) {
+void softmax(float* x, int len, float t=1.0) {
     float maxval = x[0];
-    for(int i=1;i<pos;++i) {
+    for(int i=1;i<len;++i) {
         if(x[i] > maxval) {
             maxval = x[i];
         }
     }
 
     float sum=0.f;
-    for(int i=0;i<pos;++i) {
+    for(int i=0;i<len;++i) {
         x[i] = expf((x[i]-maxval) / t);
         sum += x[i];
     }
 
-    for(int i=0;i<pos;++i) {
+    for(int i=0;i<len;++i) {
         x[i] /= sum;
     }
 }
@@ -199,9 +199,7 @@ void rms_norm(const Tensor* tb, const Tensor* norm_weight, Tensor* out, float ep
 
             float inv_rms = 1.0f / sqrtf(ss / d + eps);
             assert(inv_rms > 0.0f);
-
             __m256 v_inv_rms = _mm256_set1_ps(inv_rms);
-
             
             for (size_t j = 0; j <= d - 8; j += 8) {
                 __m256 v_x = _mm256_loadu_ps(x + j);
@@ -237,7 +235,7 @@ void rope(Tensor* tb, float theta_base, int seq_len_processed) {
 
     float* data = (float*)tb->data;
 
-    #pragma omp parallel for if (seq_len >= 8192) schedule(static)
+    //#pragma omp parallel for if (seq_len >= 1024) schedule(static)
     for (int r = 0; r < seq_len; ++r) {
         int pos = seq_len_processed + r;
 
@@ -245,7 +243,7 @@ void rope(Tensor* tb, float theta_base, int seq_len_processed) {
             float* head_data = data + (r * num_heads + h) * head_dim;
 
             for (int i = 0; i < half; ++i) {
-                double exponent = (float)(2 * i) / head_dim;
+                double exponent = (double)(2 * i) / head_dim;
                 double inv_freq = pow((double)theta_base, -exponent);
                 double theta = pos * inv_freq;
 
@@ -283,7 +281,6 @@ void attention(Tensor* q,Tensor* k, Tensor* v, int seq_len_processed, float* att
 
     if (q_len == 1) {
         const int total_kv = seq_len_processed + 1;
-        //#pragma omp parallel for if(q_head >= 8)
         for(int h=0; h<q_head; ++h) {
             int kv_selected = h / group_size;
             float* q_data = qdata + h * head_dim;
@@ -482,8 +479,8 @@ void attention(Tensor* q,Tensor* k, Tensor* v, int seq_len_processed, float* att
             #endif
 
             softmax(attn_data, q_index+1+seq_len_processed);
-        
             memset(q_data,0,sizeof(float) * head_dim);
+
             for(int kv_index=0; kv_index<=(q_index + seq_len_processed); ++kv_index) {
                 int base = kv_index * head_dim * kv_head + kv_selected * head_dim;
                 const float* v_data = vdata + base;
@@ -624,7 +621,6 @@ void matmul(const Tensor* tb,const Tensor* weight , Tensor* out) {
         #endif
     }
 }
-
 
 static inline float stable_sigmoid(float x) {
     if(x > 0) {

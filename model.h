@@ -67,9 +67,11 @@ struct RunTimeMemory {
     Tensor up;
     Tensor gate;
 
+    Tensor final_logits;     //[1, vocab_size]
+
     int seq_len_processed;
 
-    int m_prefill_chunck;    // for prefill, process tokens in chunck to save memory
+    int prefill_chunck;      // for prefill, process tokens in chunck to save memory
     int max_seq_len;
 
     uint8_t* ptr;            // temp buffer in runtime
@@ -101,8 +103,11 @@ inline void RunTimeMemory::reset() {
 }
 
 inline void RunTimeMemory::update_len(int len) {
+    in.shape[0] = out.shape[0] = len;
     q.shape[0] = k.shape[0] = v.shape[0] = len;
     up.shape[0] = gate.shape[0] = len;
+
+    k_cache.shape[0] = v_cache.shape[0] = seq_len_processed + len;
 }
 
 struct Header {

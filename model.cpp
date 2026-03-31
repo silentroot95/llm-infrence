@@ -106,20 +106,19 @@ static void copy_data(const cJSON* json,const char* name,void* begin_ptr, Tensor
 
 
 void ModelWeights::init(const ModelConfig* config) {
-    //model_config = &config;
     TENSOR_DATA_TYPE dtype = TENSOR_DATA_TYPE_F32;
     size_t dtype_size = get_data_type_size(dtype);
-    size_t bf16_dtype_size = get_data_type_size(TENSOR_DATA_TYPE_BF16);
+    //size_t bf16_dtype_size = get_data_type_size(TENSOR_DATA_TYPE_BF16);
 
     size_t f32_elements = (
-        2*config->embed_size * config->vocab_size  //embed and lm_head 
-        + config->embed_size                      //final_norm
+        2*config->embed_size * config->vocab_size                               //embed and lm_head 
+        + config->embed_size                                                    //final_norm
         + config->num_layers*(
-            2*config->embed_size                                             //attntion norm and ffn norm
-            + 2*config->q_heads * config->head_size * config->embed_size       //q weight and o weight
-            + 2*config->kv_heads * config->head_size * config->embed_size      //k v weight
-            + 2 * config->head_size                                          //q k norm
-            + 3 * config->embed_size * config->ffn_size                       // down weight
+            2*config->embed_size                                                //attntion norm and ffn norm
+            + 2*config->q_heads * config->head_size * config->embed_size        //q weight and o weight
+            + 2*config->kv_heads * config->head_size * config->embed_size       //k v weight
+            + 2 * config->head_size                                             //q k norm
+            + 3 * config->embed_size * config->ffn_size                         // down weight
         )
     );
 
@@ -202,7 +201,6 @@ void ModelWeights::init(const ModelConfig* config) {
         layers[i].ffn_norm.data = (void*)ptr;
         ptr += layers[i].ffn_norm.nbytes();
         
-        //up and gate weight use bf16 to improve decode speed
         layers[i].up_weight.data_type = dtype;
         layers[i].up_weight.dim = 2;
         layers[i].up_weight.shape[0] = config->ffn_size;
@@ -302,7 +300,7 @@ static inline size_t align_size(size_t size, int align=64) {
 }
 
 void RunTimeMemory::init(const ModelConfig* config, int len){
-    m_prefill_chunck = len;
+    prefill_chunck = len;
     TENSOR_DATA_TYPE data_type = TENSOR_DATA_TYPE_F32;
     size_t dtype_size = get_data_type_size(data_type);
     int kv_elements = config->num_layers * config->kv_heads * config->max_seq_len * config->head_size;
@@ -312,23 +310,22 @@ void RunTimeMemory::init(const ModelConfig* config, int len){
 
 
     // temp buffer, it dynamic change in the forward process
-    size_t mha_size = align_size(config->q_heads * config->head_size * m_prefill_chunck * dtype_size, 64); //q project temp value
+    size_t mha_size = align_size(config->q_heads * config->head_size * prefill_chunck * dtype_size, 64); //q project temp value
         
     mha_size += align_size(config->q_heads * config->max_seq_len * dtype_size, 64);  //attention score per token
 
-    size_t mlp_size = 2 * align_size(m_prefill_chunck * config->ffn_size * dtype_size, 64);  //up and gate project temp value        
-
-    mlp_size += align_size(m_prefill_chunck * config->ffn_size * dtype_size, 64);  // for debug sigmoid(gate) value;
+    size_t mlp_size = 2 * align_size(prefill_chunck * config->ffn_size * dtype_size, 64);  //up and gate project temp value        
 
     size_t max_size = (mha_size > mlp_size ? mha_size : mlp_size);
 
-    size_t final_logit_elements = align_size(m_prefill_chunck * config->vocab_size * dtype_size, 64);  //final logit before softmax
+    //we only calculate the last tokens logits
+    size_t final_logit_elements = align_size(1 * config->vocab_size * dtype_size, 64);  //final logit before softmax
 
     max_size = (max_size > final_logit_elements ? max_size : final_logit_elements);
     
-    size_t inout_size = align_size(m_prefill_chunck * config->embed_size * dtype_size, 64);  //layer input and output
+    size_t inout_size = align_size(prefill_chunck * config->embed_size * dtype_size, 64);  //layer input and output
     
-    size_t total_size = 2 * inout_size + max_size; // in and out + temp buffer
+    size_t total_size = 2 * inout_size + max_size; // input, output + temp buffer
 
     ptr = (uint8_t*)malloc(total_size);
     
@@ -343,11 +340,14 @@ void RunTimeMemory::init(const ModelConfig* config, int len){
     ptr += 2 * inout_size;
     capacity = total_size - 2 * inout_size;
     offset = 0;
-
     seq_len_processed = 0;
-    //in.dim = out.dim = 0;
 
-    k_cache.data_type = v_cache.data_type = TENSOR_DATA_TYPE_F32;
+    //init in out tensor shape
+    in.dim = out.dim = 2;
+    in.shape[1] = out.shape[1] = config->embed_size;
+    in.data_type = out.data_type = data_type;
+
+    k_cache.data_type = v_cache.data_type = data_type;
     k_cache.dim = v_cache.dim = 3;
     k_cache.shape[0] = v_cache.shape[0] = 0;
     k_cache.shape[1] = v_cache.shape[1] = config->kv_heads;
@@ -363,11 +363,14 @@ void RunTimeMemory::init(const ModelConfig* config, int len){
     up.data_type = gate.data_type = data_type;
     up.dim = gate.dim = 2;
     up.shape[1] = gate.shape[1] = config->ffn_size;
+
+    final_logits.dim = 2;
+    final_logits.data_type = data_type;
+    final_logits.shape[0] = 1;
+    final_logits.shape[1] = config->vocab_size;
 }
 
 void* RunTimeMemory::allocate_kv(int li, int seq_len, const ModelConfig* config,bool is_k) {
-    //uint8_t* data = NULL;
-    //int dtype_size = get_data_type_size(k_cache.data_type);
     float* data = nullptr;
     if(is_k) {
         data = (float*)k_data;

@@ -40,19 +40,21 @@ int main() {
     Qwen3 qwen3 = Qwen3(&model_config, &model_weights, &memory);
     
 
-    std::string user_prompt = ("你是一个高性能推理引擎的内部调试模块，请严格按照以下规则进行“思考模拟”但不要输出推理过程，只输出最终结构化结果。本任务用于测试系统在复杂上下文下的prefill性能，因此输入文本较长且包含多种语义结构。\n"
-                          "输入文本包含多轮对话，每轮对话由一个角色（system、user、assistant）和对应的内容组成。内容中可能包含纯文本、JSON结构化数据、以及特殊标记等。\n"
-                          "请根据输入的对话内容，模拟模型在prefill阶段的思考过程，输出一个JSON对象，包含以下字段：\n"
-                          "1. tokens: 模拟prefill阶段模型接收到的token序列（以token id形式表示）。\n"
-                          "2. attention_pattern: 模拟prefill阶段模型计算的注意力模式，描述哪些token之间会有较强的注意力连接。\n"
-                          "3. kv_cache_update: 模拟prefill阶段模型更新的KV缓存状态，描述哪些token被存储到KV缓存中，以及它们对应的层数和位置。\n"
-                          "4. generation_prompt: 如果add_generation_prompt为true，模拟prefill阶段模型生成的下一步生成提示（generation prompt），描述它的内容和位置。\n"
-                          "请确保输出的JSON对象格式正确，并且内容详尽地反映了模型在prefill阶段可能的内部状态和思考过程。");
-
+    std::string user_prompt = "阅读下面的材料，根据要求写作。\n"
+                             "他想要给孩子们唱上一段，可是心里直翻腾，开不了口。\n"
+                             "——老舍《鼓书艺人》（见全国一卷阅读II）\n"
+                             "假如我是一只鸟，\n"
+                             "我也应该用嘶哑的喉咙歌唱\n"
+                             "——艾青《我爱这土地》\n"
+                             "我要以带血的手和你们一一拥抱，\n"
+                             "因为一个民族已经起来\n"
+                             "——穆旦《赞美》\n"
+                             "以上材料引发了你怎样的联想和思考？请写一篇文章。\n"
+                             "要求：选准角度，确定立意，明确文体，自拟标题；不要套作，不得抄袭；不得泄露个人信息；不少于800字。";
 
     std::vector<ChatMessage> messages = {
        // {"system", "You are a helpful assistant.", "", {}},
-        {"user", "解释下什么是Transformer模型？", "", {}}
+        {"user", user_prompt, "", {}}
     };
 
     std::string prompt = tk.apply_chat_template(messages, true, {}, true);
@@ -64,7 +66,7 @@ int main() {
     }
     printf("\n");
 
-    Sampler sampler(model_config.vocab_size, 0.7,0.8,20);
+    Sampler sampler(model_config.vocab_size, 0.6,0.95,20);
 
 
     Tensor tokens;
@@ -94,7 +96,7 @@ int main() {
 
         if (is_eos(next_token, tk.eos_token_id) || 
             memory.seq_len_processed >= model_config.max_seq_len ||
-            decode_tokens >= 256) {
+            decode_tokens >= 800) {
             break;
         }
 

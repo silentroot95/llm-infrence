@@ -53,7 +53,7 @@ static inline void store_f32_tensor_to_bf16(const Tensor* src, Tensor* dst) {
 static inline void simd_gemv_f32(const float* x, const float* weight, float* out, int hidden_dim, int out_dim) {
     const int block_count = out_dim / 4;
 
-    #pragma omp parallel for if(out_dim >= 8192) schedule(static)
+    #pragma omp parallel for if(out_dim >= 2048) schedule(static)
     for(int bi = 0; bi < block_count; ++bi) {
         const int oi = bi * 4;
         const float* w0 = weight + (oi + 0) * hidden_dim;
@@ -281,6 +281,7 @@ void attention(Tensor* q,Tensor* k, Tensor* v, int seq_len_processed, float* att
 
     if (q_len == 1) {
         const int total_kv = seq_len_processed + 1;
+        #pragma omp parallel for schedule(static)
         for(int h=0; h<q_head; ++h) {
             int kv_selected = h / group_size;
             float* q_data = qdata + h * head_dim;
@@ -396,7 +397,7 @@ void attention(Tensor* q,Tensor* k, Tensor* v, int seq_len_processed, float* att
         return;
     }
 
-    #pragma omp parallel for if(q_len >= 1024) schedule(static)
+    #pragma omp parallel for schedule(static)
     for(int h=0;h<q_head;++h) {
         int kv_selected = h / group_size;
         for(int q_index=0;q_index<q_len;++q_index) {
@@ -543,8 +544,8 @@ void matmul(const Tensor* tb,const Tensor* weight , Tensor* out) {
         #endif
         return;
     }
-
-    #pragma omp parallel for if(seq_len >= 1024) schedule(static)
+    
+    #pragma omp parallel for if(row >= 64) schedule(static)
     for(int r=0; r<row; ++r) {
         float* o =  out_data + r*out_size;
         const float* x = data + r*hidden_size;

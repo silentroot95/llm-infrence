@@ -58,13 +58,8 @@ int main() {
     };
 
     std::string prompt = tk.apply_chat_template(messages, true, {}, true);
-    printf("Prompt:\n%s\n", prompt.c_str());
+    //printf("Prompt:\n%s\n", prompt.c_str());
     std::vector<int> token_ids = tk.encode(prompt);
-
-    for (int id : token_ids) {
-        printf("%d ", id);
-    }
-    printf("\n");
 
     Sampler sampler(model_config.vocab_size, 0.6,0.95,20);
 

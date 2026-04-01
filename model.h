@@ -45,10 +45,14 @@ struct ModelWeights {
     int num_layers;
 
     void init(const ModelConfig* config);
-    inline void destory();
+    inline void destroy();
     void load_tensor(const char* path);
 };
 
+inline void ModelWeights::destroy() {
+    free(layers);
+    free(data);
+}
 
 struct RunTimeMemory {
     void* k_data;            // [layers,seq_len_max,kv_heads,head_size]

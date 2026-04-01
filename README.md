@@ -1,13 +1,13 @@
 # LLM Inference
 
-一个基于 C++ 实现的轻量级大语言模型推理项目，当前示例代码面向 `Qwen3-0.6B` 模型，完成了从配置读取、权重加载、Tokenizer 编码、Chat Template 拼接，到 Prefill / Decode 推理和性能统计的完整流程。
+一个基于 C++ 实现的轻量级大语言模型推理项目，当前示例代码面向 `Qwen3-0.6B` 模型，完成了从配置读取、权重加载、Tokenizer 编码、Chat Template 应用，到 Prefill / Decode 推理和性能统计的完整流程。
 
 ## 项目实现
 
 - RunTimeMemory 统一内存管理，无额外运行时开销，支持chunck prefill
 - 支持AVX2和FMA加速矩阵计算
 - 部分权重INT8量化，提升 decode 阶段的性能
-- BPE 分词实现和 jinja Chat 模板的应用
+- 支持 BPE 分词和 jinja Chat 模板的应用
 - 支持 temperature, top k, top p 的输出采样
 - 支持 prefill / decode 阶段的吞吐和算子级性能统计
 
@@ -66,7 +66,7 @@ g++ -std=c++17 -g -O3 -mavx2 -mfma -ffast-math -fopenmp \
 ```bash
 ./llm_inference
 ```
-## 性能统计
+## 性能
 
 >**prefill**
 

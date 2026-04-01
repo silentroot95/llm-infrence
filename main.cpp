@@ -119,5 +119,7 @@ int main() {
     printf("\n[Perf] decode : %d tokens, %.2f ms, %.2f tokens/s\n",
            decode_tokens, decode_ms, decode_tps);
     qwen3.print_profile("decode");
+    model_weights.destroy();
+    memory.destroy();
     return 0;
 }

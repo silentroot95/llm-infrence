@@ -117,7 +117,7 @@ static void copy_data(const cJSON* json,const char* name,void* begin_ptr, Tensor
     }
 }
 
-// convert fp32 weight to int8 quantized weight, using per-row quantization
+// convert bf16 weight to int8 quantized weight, using per-row quantization
 void quantize_row_q8_0(const uint16_t* bf16_weight, QuantizedWeightINT8* q_out) {
     int rows = q_out->shape[0];
     int cols = q_out->shape[1];
@@ -341,11 +341,6 @@ void ModelWeights::load_tensor(const char* path) {
     cJSON_Delete(json);
     free(json_string);
     memory_unmap(data,size);
-}
-
-inline void ModelWeights::destory() {
-    free(layers);
-    free(data);
 }
 
 

@@ -6,7 +6,7 @@
 
 - RunTimeMemory 统一内存管理，无额外运行时开销，支持chunck prefill
 - 支持AVX2和FMA加速矩阵计算
-- 部分权重INT8量化，提升 decode 阶段的性能
+- lm_head权重使用INT8量化，提升 decode 阶段的性能，其他权重使用F32
 - 支持 BPE 分词和 jinja Chat 模板的应用
 - 支持 temperature, top k, top p 的输出采样
 - 支持 prefill / decode 阶段的吞吐和算子级性能统计

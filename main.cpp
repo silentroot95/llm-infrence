@@ -99,8 +99,7 @@ int main() {
     while (1) {
         int next_token = sampler.sample(logits, true);
         if (is_eos(next_token, tk.eos_token_id) || 
-            memory.seq_len_processed >= model_config.max_seq_len ||
-            decode_tokens >= 800) {
+            memory.seq_len_processed >= model_config.max_seq_len) {
             break;
         }
 

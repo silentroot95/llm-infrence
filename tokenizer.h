@@ -101,6 +101,10 @@ struct Sampler {
     std::vector<int> m_indices;     
 
     Sampler(int vocab_size,float t,float top_p, int top_k);
+    
+    /*if do_sample is false, it will do greedy sampling (i.e., argmax)
+      if do_sample is true, it will do multinomial sampling with temperature, top_k and top_p
+    */
     int sample(const Tensor* logits, bool do_sample=true);
     int sample_multinomial(const std::vector<int>& idx,
                            const std::vector<float>& p);

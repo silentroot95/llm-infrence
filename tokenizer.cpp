@@ -421,7 +421,7 @@ void Tokenizer::load_merges(const char* path) {
     int rank = 0;
 
     while (p < end) {
-        // ===== 1. 读取一行 =====
+        //readline
         const char* line_start = p;
         while (p < end && *p != '\n') p++;
         const char* line_end = p;
@@ -430,39 +430,38 @@ void Tokenizer::load_merges(const char* path) {
         // 跳过空行
         if (line_start == line_end) continue;
 
-        // 跳过注释
+        // 只有第一行是注释，后面#开头的不是
         //if (*line_start == '#') continue;
 
-        // ===== 2. split：找空格 =====
+        // find space 
         const char* space = line_start;
         while (space < line_end && *space != ' ') space++;
-        if (space == line_end) continue; // 格式异常
+        if (space == line_end) continue; 
 
         // token A
         std::string a(line_start, space - line_start);
 
-        // token B（注意处理 \r）
+        // token B
         const char* b_start = space + 1;
         const char* b_end = line_end;
 
+        // trim newline
         if (b_end > b_start && *(b_end - 1) == '\r') {
-            b_end--; // 去掉 Windows \r
+            b_end--; 
         }
 
         std::string b(b_start, b_end - b_start);
 
-        // ===== 3. vocab 查 id =====
         auto it1 = vocab.find(a);
         auto it2 = vocab.find(b);
 
         if (it1 == vocab.end() || it2 == vocab.end()) {
-            continue; // tokenizer 允许跳过异常
+            continue; 
         }
 
         int id1 = it1->second;
         int id2 = it2->second;
 
-        // ===== 4. pack + 存 rank =====
         uint64_t key = pack_key(id1, id2);
         merges[key] = rank++;
     }

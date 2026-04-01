@@ -43,7 +43,7 @@
 
 ## 依赖要求
 
-- Linux / macOS 环境优先
+- Linux / macOS / Windows
 - `g++`，建议支持 C++17
 - OpenMP
 - 支持 AVX2/FMA 的 CPU 可获得更好的性能
@@ -66,18 +66,34 @@ g++ -std=c++17 -g -O3 -mavx2 -mfma -ffast-math -fopenmp \
 ```bash
 ./llm_inference
 ```
+## 性能统计
 
-## 采样与生成设置
+`prefill`
 
-当前示例中的采样器参数定义在 [main.cpp](/home/wwb/llm-infrence/main.cpp)：
+[Perf] prefill: 147 tokens, 1151.61 ms, 127.65 tokens/s
+[Profile] prefill total op time: 1151.54 ms
+[Profile] embed          0.45 ms    0.04%  calls=1
+[Profile] rms_norm       7.80 ms    0.68%  calls=113
+[Profile] matmul_qkv   246.86 ms   21.44%  calls=84
+[Profile] matmul_o     110.27 ms    9.58%  calls=28
+[Profile] matmul_ffn_up_gate   496.51 ms   43.12%  calls=28
+[Profile] matmul_ffn_down   185.62 ms   16.12%  calls=28
+[Profile] matmul_lm_head     3.57 ms    0.31%  calls=1
+[Profile] rope          68.69 ms    5.97%  calls=56
+[Profile] attention     24.81 ms    2.15%  calls=28
+[Profile] add            6.96 ms    0.60%  calls=56
 
-```cpp
-Sampler sampler(model_config.vocab_size, 0.6, 0.95, 20);
-```
+`decode`
 
-对应含义：
-
-- `temperature = 0.6`
-- `top_p = 0.95`
-- `top_k = 20`
-
+[Perf] decode : 661 tokens, 36161.25 ms, 18.28 tokens/s
+[Profile] decode total op time: 36135.46 ms
+[Profile] embed          1.00 ms    0.00%  calls=661
+[Profile] rms_norm      78.67 ms    0.22%  calls=74693
+[Profile] matmul_qkv  8252.82 ms   22.84%  calls=55524
+[Profile] matmul_o    3844.32 ms   10.64%  calls=18508
+[Profile] matmul_ffn_up_gate 11318.65 ms   31.32%  calls=18508
+[Profile] matmul_ffn_down  5694.85 ms   15.76%  calls=18508
+[Profile] matmul_lm_head  2687.64 ms    7.44%  calls=661
+[Profile] rope         423.20 ms    1.17%  calls=37016
+[Profile] attention   3784.74 ms   10.47%  calls=18508
+[Profile] add           49.59 ms    0.14%  calls=37016

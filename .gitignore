@@ -1,7 +1,7 @@
 
 *.exe
 *.cuh
-app
+llm-inference
 
 .vscode/
 qwen35/

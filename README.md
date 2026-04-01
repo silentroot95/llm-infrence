@@ -54,19 +54,21 @@
 ```bash
 g++ -std=c++17 -g -O3 -mavx2 -mfma -ffast-math -fopenmp \
   main.cpp model.cpp tokenizer.cpp operator.cpp cJSON.c \
-  -o llm_inference
+  -o llm-inference
 ```
 
 如果你的平台不支持 `avx2`和`fma`，可以去掉`-mavx2 -mfma`编译选项。
 
 ## 运行
 
-编译完成后直接执行：
+`OMP_NUM_THREADS` 可以根据机器物理核心数调整
 
 ```bash
-./llm_inference
+OMP_NUM_THREADS=12 OMP_PROC_BIND=true OMP_PLACES=cores OMP_DYNAMIC=false ./llm-inference
 ```
 ## 性能
+机器：CPU 12th Gen Intel(R) Core(TM) i7-12700H 14核20逻辑处理器，内存 16GB。<br>
+开启 OpenMP, AVX2, FMA 优化。  
 
 >**prefill**
 

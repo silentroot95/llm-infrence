@@ -92,7 +92,7 @@ inline void Qwen3::print_profile(const char* stage_name) const {
         total_ms += profile_stats.total_ms[i];
     }
 
-    printf("[Profile] %s total op time: %.2f ms\n", stage_name, total_ms);
+    //printf("[Profile] %s total op time: %.2f ms\n", stage_name, total_ms);
     for (int i = 0; i < PROFILE_OP_COUNT; ++i) {
         if (profile_stats.calls[i] == 0) {
             continue;

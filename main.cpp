@@ -3,7 +3,16 @@
 
 #include <iostream>
 #include <chrono>
+#include <cctype>
 
+bool is_empty_or_whitespace(const std::string& s) {
+    for (unsigned char c : s) {
+        if (!std::isspace(c)) {
+            return false;
+        }
+    }
+    return true;
+}
 inline bool is_eos(int token, const std::vector<int>& eos_ids) {
     for (int id : eos_ids) {
         if (token == id) return true;
@@ -50,6 +59,8 @@ int main() {
 
         printf("\nUser> ");
         std::getline(std::cin, user_prompt);
+
+        if(is_empty_or_whitespace(user_prompt)) continue;
 
         if (user_prompt == "/exit") break;
 
